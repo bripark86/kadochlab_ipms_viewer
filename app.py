@@ -167,7 +167,10 @@ with tabs[0]:
             "full_filename": "Full Filename",
         }
     )
-    st.dataframe(table_df.style.applymap(highlight_target_cell, subset=["Target"]), use_container_width=True)
+    if not table_df.empty:
+        st.dataframe(table_df.style.map(highlight_target_cell, subset=["Target"]), use_container_width=True)
+    else:
+        st.info("No experiments available for this investigator.")
     options = inv_df["file_name"].tolist()
     default_idx = 0
     if st.session_state["quick_open_file"] in options:
