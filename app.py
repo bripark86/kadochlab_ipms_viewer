@@ -273,7 +273,7 @@ with tabs[1]:
             res = pd.DataFrame(rows).sort_values("Spectral Count", ascending=False)
             if compare_core:
                 st.dataframe(
-                    res.style.applymap(lambda v: f"background-color: {SOFT_BLUE}; color: {TEXT_DARK};" if v else "", subset=["Core BAF IP"]),
+                    res.style.map(lambda v: f"background-color: {SOFT_BLUE}; color: {TEXT_DARK};" if v else "", subset=["Core BAF IP"]),
                     use_container_width=True,
                 )
             else:
