@@ -144,17 +144,31 @@ if meta_df.empty:
 
 if "quick_open_file" not in st.session_state:
     st.session_state["quick_open_file"] = None
+if "selected_file" not in st.session_state:
+    st.session_state["selected_file"] = None
+if "active_tab" not in st.session_state:
+    st.session_state["active_tab"] = "Dataset Browser"
 if "qc_path" not in st.session_state:
     st.session_state["qc_path"] = None
 
-tabs = st.tabs(["Dataset Browser", "Discovery Hub", "Comparative Analysis", "Data Management"])
+tab_options = ["Dataset Browser", "Discovery Hub", "Comparative Analysis", "Data Management"]
+if st.session_state["active_tab"] not in tab_options:
+    st.session_state["active_tab"] = "Dataset Browser"
 
-with tabs[0]:
+with st.sidebar:
+    st.session_state["active_tab"] = st.radio(
+        "Navigation",
+        options=tab_options,
+        index=tab_options.index(st.session_state["active_tab"]),
+    )
+
+if st.session_state["active_tab"] == "Dataset Browser":
     section_header("Dataset Browser (Control Center)", BAF_RED)
     investigators = sorted(meta_df["investigator"].unique().tolist())
     default_inv = investigators[0]
-    if st.session_state["quick_open_file"] in meta_df["file_name"].tolist():
-        default_inv = meta_df.loc[meta_df["file_name"] == st.session_state["quick_open_file"], "investigator"].iloc[0]
+    preferred_file = st.session_state.get("selected_file") or st.session_state.get("quick_open_file")
+    if preferred_file in meta_df["file_name"].tolist():
+        default_inv = meta_df.loc[meta_df["file_name"] == preferred_file, "investigator"].iloc[0]
     selected_inv = st.selectbox("Investigator", options=investigators, index=investigators.index(default_inv))
     inv_df = meta_df[meta_df["investigator"] == selected_inv].copy()
     table_df = inv_df[["session_id", "initials", "target", "cell_line", "sample_label", "full_filename"]].rename(
@@ -173,9 +187,10 @@ with tabs[0]:
         st.info("No experiments available for this investigator.")
     options = inv_df["file_name"].tolist()
     default_idx = 0
-    if st.session_state["quick_open_file"] in options:
-        default_idx = options.index(st.session_state["quick_open_file"])
+    if preferred_file in options:
+        default_idx = options.index(preferred_file)
     selected_file = st.selectbox("Select experiment", options=options, index=default_idx)
+    st.session_state["selected_file"] = selected_file
     selected_row = inv_df[inv_df["file_name"] == selected_file].iloc[0]
     st.session_state["qc_path"] = selected_row["path"]
     exp = load_experiment_summary(selected_row["path"])
@@ -209,7 +224,7 @@ with tabs[0]:
     cov_fig.update_layout(plot_bgcolor=BG_WHITE, paper_bgcolor=BG_WHITE)
     st.plotly_chart(cov_fig, use_container_width=True)
 
-with tabs[1]:
+if st.session_state["active_tab"] == "Discovery Hub":
     section_header("Discovery Hub", OCEAN_BLUE)
     _, center, _ = st.columns([1, 2, 1])
     with center:
@@ -281,8 +296,10 @@ with tabs[1]:
 
             qf = st.selectbox("Quick Open experiment", options=res["File Name"].tolist())
             if st.button("Open in Dataset Browser"):
+                st.session_state["selected_file"] = qf
                 st.session_state["quick_open_file"] = qf
-                st.success("Pinned for Dataset Browser.")
+                st.session_state["active_tab"] = "Dataset Browser"
+                st.rerun()
 
             inv_dist = res.groupby("Investigator", as_index=False)["Spectral Count"].count().rename(columns={"Spectral Count": "Hit Count"}).sort_values("Hit Count", ascending=False)
             cell_enrich = res.groupby("Cell Line", as_index=False)["Spectral Count"].sum().sort_values("Spectral Count", ascending=False)
@@ -298,7 +315,7 @@ with tabs[1]:
         else:
             st.info("No hits found.")
 
-with tabs[2]:
+if st.session_state["active_tab"] == "Comparative Analysis":
     section_header("Comparative Analysis", EMERALD)
     picks = st.multiselect("Choose 2 to 4 experiments", options=meta_df["file_name"].tolist(), max_selections=4)
     if len(picks) == 2:
@@ -352,7 +369,7 @@ with tabs[2]:
     else:
         st.info("Select at least 2 experiments.")
 
-with tabs[3]:
+if st.session_state["active_tab"] == "Data Management":
     section_header("Data Management", OCEAN_BLUE)
     c1, c2 = st.columns([2, 1])
     with c1:
