@@ -255,7 +255,7 @@ if st.session_state["active_tab"] == "Dataset Browser":
     m2.metric("BAF Subunits (Ranked)", f"{baf_count}/26")
     m3.metric("Top Interactor", top_interactor)
 
-    st.plotly_chart(volcano_plot(exp, "Experiment Volcano", stats_valid=st.session_state["stats_valid"]), use_container_width=True)
+    st.plotly_chart(volcano_plot(exp, "Experiment Scatter", stats_valid=st.session_state["stats_valid"]), use_container_width=True)
 
     coverage = exp.copy()
     coverage["canonical"] = coverage["Gene Symbol"].apply(lambda g: dp.identify_baf_target(g) or "")
@@ -379,9 +379,9 @@ if st.session_state["active_tab"] == "Comparative Analysis":
         b_stats_valid = st.session_state.get("stats_valid", True)
         c1, c2 = st.columns(2)
         with c1:
-            st.plotly_chart(volcano_plot(a_exp, f"Volcano: {a_file}", stats_valid=a_stats_valid), use_container_width=True)
+            st.plotly_chart(volcano_plot(a_exp, f"Scatter: {a_file}", stats_valid=a_stats_valid), use_container_width=True)
         with c2:
-            st.plotly_chart(volcano_plot(b_exp, f"Volcano: {b_file}", stats_valid=b_stats_valid), use_container_width=True)
+            st.plotly_chart(volcano_plot(b_exp, f"Scatter: {b_file}", stats_valid=b_stats_valid), use_container_width=True)
 
         df1 = a_exp[["Gene Symbol", "Spectral Count"]]
         df2 = b_exp[["Gene Symbol", "Spectral Count"]]
