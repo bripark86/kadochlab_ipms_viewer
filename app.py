@@ -1,6 +1,7 @@
 import math
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
@@ -91,6 +92,18 @@ def load_experiment_summary(path: str) -> pd.DataFrame:
     return dp.summarize_experiment(Path(path))
 
 
+def load_and_process_file(path: str) -> pd.DataFrame:
+    df = load_experiment_summary(path).copy()
+    lda = pd.to_numeric(df["LDA Probability"], errors="coerce")
+    valid_lda = (lda > 0) & (lda <= 1)
+    df["y_axis_val"] = np.where(valid_lda, -np.log10(lda), np.nan)
+
+    y_std = float(df["y_axis_val"].std(skipna=True)) if not df["y_axis_val"].dropna().empty else np.nan
+    stats_valid = not (np.isnan(y_std) or y_std == 0.0)
+    st.session_state["stats_valid"] = stats_valid
+    return df
+
+
 def is_baf_gene(gene: str) -> bool:
     return dp.identify_baf_target(gene) is not None
 
@@ -108,9 +121,14 @@ def volcano_plot(df: pd.DataFrame, title: str) -> go.Figure:
     plot_df = df.copy()
     plot_df["is_baf"] = plot_df["Gene Symbol"].apply(is_baf_gene)
     plot_df["x"] = plot_df["Spectral Count"].apply(lambda v: math.log10(float(v) + 1))
-    plot_df["p"] = plot_df["LDA Probability"].clip(lower=1e-8)
-    plot_df["y"] = plot_df["p"].apply(lambda v: -math.log10(float(v)))
+    if "y_axis_val" in plot_df.columns:
+        plot_df["y"] = plot_df["y_axis_val"]
+    else:
+        lda = pd.to_numeric(plot_df["LDA Probability"], errors="coerce")
+        valid_lda = (lda > 0) & (lda <= 1)
+        plot_df["y"] = np.where(valid_lda, -np.log10(lda), np.nan)
     plot_df["high_conf"] = plot_df["LDA Probability"] >= 0.8
+    plot_df = plot_df.dropna(subset=["y"])
 
     fig = go.Figure()
     other = plot_df[(~plot_df["is_baf"]) & (~plot_df["high_conf"])]
@@ -150,6 +168,8 @@ if "active_tab" not in st.session_state:
     st.session_state["active_tab"] = "Dataset Browser"
 if "qc_path" not in st.session_state:
     st.session_state["qc_path"] = None
+if "stats_valid" not in st.session_state:
+    st.session_state["stats_valid"] = True
 
 tab_options = ["Dataset Browser", "Discovery Hub", "Comparative Analysis", "Data Management"]
 if st.session_state["active_tab"] not in tab_options:
@@ -193,7 +213,7 @@ if st.session_state["active_tab"] == "Dataset Browser":
     st.session_state["selected_file"] = selected_file
     selected_row = inv_df[inv_df["file_name"] == selected_file].iloc[0]
     st.session_state["qc_path"] = selected_row["path"]
-    exp = load_experiment_summary(selected_row["path"])
+    exp = load_and_process_file(selected_row["path"])
     exp["is_baf"] = exp["Gene Symbol"].apply(is_baf_gene)
 
     total_proteins = int(exp["Gene Symbol"].nunique())
@@ -210,7 +230,10 @@ if st.session_state["active_tab"] == "Dataset Browser":
     m2.metric("BAF Subunits (Ranked)", f"{baf_count}/26")
     m3.metric("Top Interactor", top_interactor)
 
-    st.plotly_chart(volcano_plot(exp, "Experiment Volcano"), use_container_width=True)
+    if st.session_state["stats_valid"]:
+        st.plotly_chart(volcano_plot(exp, "Experiment Volcano"), use_container_width=True)
+    else:
+        st.warning("⚠️ Statistical Significance Missing: This dataset contains placeholder LDA values (-1/0). Confidence (Y-axis) cannot be determined.")
 
     coverage = exp.copy()
     coverage["canonical"] = coverage["Gene Symbol"].apply(lambda g: dp.identify_baf_target(g) or "")
@@ -322,13 +345,21 @@ if st.session_state["active_tab"] == "Comparative Analysis":
         a_file, b_file = picks[0], picks[1]
         a_row = meta_df[meta_df["file_name"] == a_file].iloc[0]
         b_row = meta_df[meta_df["file_name"] == b_file].iloc[0]
-        a_exp = load_experiment_summary(a_row["path"])
-        b_exp = load_experiment_summary(b_row["path"])
+        a_exp = load_and_process_file(a_row["path"])
+        a_stats_valid = st.session_state.get("stats_valid", True)
+        b_exp = load_and_process_file(b_row["path"])
+        b_stats_valid = st.session_state.get("stats_valid", True)
         c1, c2 = st.columns(2)
         with c1:
-            st.plotly_chart(volcano_plot(a_exp, f"Volcano: {a_file}"), use_container_width=True)
+            if a_stats_valid:
+                st.plotly_chart(volcano_plot(a_exp, f"Volcano: {a_file}"), use_container_width=True)
+            else:
+                st.warning(f"⚠️ Statistical Significance Missing for {a_file}.")
         with c2:
-            st.plotly_chart(volcano_plot(b_exp, f"Volcano: {b_file}"), use_container_width=True)
+            if b_stats_valid:
+                st.plotly_chart(volcano_plot(b_exp, f"Volcano: {b_file}"), use_container_width=True)
+            else:
+                st.warning(f"⚠️ Statistical Significance Missing for {b_file}.")
 
         df1 = a_exp[["Gene Symbol", "Spectral Count"]]
         df2 = b_exp[["Gene Symbol", "Spectral Count"]]
