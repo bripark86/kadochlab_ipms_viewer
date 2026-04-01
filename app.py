@@ -19,7 +19,9 @@ CARD_BORDER = "#F0F2F6"
 BG_WHITE = "#FFFFFF"
 TEXT_DARK = "#1F2937"
 SOFT_BLUE = "#E0F2FE"
-CONTROL_MINT = "#ECFDF5"
+CEBPE_TEAL = "#008080"
+CONTROL_GREY_BG = "#F0F2F6"
+CONTROL_GREY_FG = "#31333F"
 
 
 def inject_theme() -> None:
@@ -115,8 +117,10 @@ def highlight_target_cell(val: str) -> str:
     s = str(val)
     if dp.identify_baf_target(s):
         return f"background-color: {BAF_RED}; color: white;"
+    if s == "CEBPE":
+        return f"background-color: {CEBPE_TEAL}; color: white;"
     if s == "Control (IgG/Mock)":
-        return f"background-color: {CONTROL_MINT}; color: {TEXT_DARK};"
+        return f"background-color: {CONTROL_GREY_BG}; color: {CONTROL_GREY_FG};"
     return f"background-color: {SOFT_BLUE}; color: {TEXT_DARK};"
 
 
@@ -280,13 +284,34 @@ if st.session_state["active_tab"] == "Discovery Hub":
     compare_core = st.toggle("Compare with Core BAF", value=False)
 
     if gene_query:
-        canonical_bait = dp.identify_baf_target(gene_query)
-        is_core_search = dp.is_core_baf_canonical(canonical_bait)
+        bait_for_consensus = dp.resolve_search_as_bait(gene_query)
 
-        if is_core_search and canonical_bait is not None:
-            bait_runs = meta_df[meta_df["target"] == canonical_bait].copy()
-            st.markdown("### Consensus Interactors (BAF bait)")
-            st.caption(f"Mean spectral counts across {len(bait_runs)} run(s) with bait **{canonical_bait}**.")
+        if bait_for_consensus is not None:
+            bait_runs = meta_df[meta_df["target"] == bait_for_consensus].copy()
+            st.markdown("### Primary target — enrichment profile")
+            if bait_for_consensus == "CEBPE":
+                st.caption(f"Indexed experiments where **CEBPE** is the IP bait (primary target outside the 26 BAF core).")
+            else:
+                st.caption(f"Indexed experiments where **{bait_for_consensus}** is the IP bait.")
+            if not bait_runs.empty:
+                enrich_cols = bait_runs[
+                    ["investigator", "session_id", "cell_line", "sample_label", "file_name", "full_filename"]
+                ].rename(
+                    columns={
+                        "investigator": "Investigator",
+                        "session_id": "Exp ID",
+                        "cell_line": "Cell Line",
+                        "sample_label": "Sample Label",
+                        "file_name": "File Name",
+                        "full_filename": "Full Filename",
+                    }
+                )
+                st.dataframe(enrich_cols.sort_values("Exp ID"), use_container_width=True)
+            else:
+                st.info(f"No runs indexed with bait target **{bait_for_consensus}**.")
+
+            st.markdown("### Primary target — consensus interactors")
+            st.caption(f"Mean spectral counts across {len(bait_runs)} run(s) with bait **{bait_for_consensus}**.")
             if not bait_runs.empty:
                 all_rows = []
                 for _, row in bait_runs.iterrows():
@@ -306,7 +331,7 @@ if st.session_state["active_tab"] == "Discovery Hub":
                 consensus["Prevalence Score (%)"] = (consensus["Runs_Present"] / len(bait_runs) * 100).round(1)
                 st.dataframe(consensus, use_container_width=True)
             else:
-                st.info("No runs indexed for this bait target.")
+                st.info("No consensus table (no bait-matched runs).")
 
         st.markdown("### Global Results")
         rows = []
@@ -325,7 +350,10 @@ if st.session_state["active_tab"] == "Discovery Hub":
                         "Exp ID": row["session_id"],
                         "Spectral Count": float(best["Spectral Count"]),
                         "Unique Peptides": int(best["Unique Peptides"]),
-                        "Core BAF IP": is_baf_gene(str(row["target"])),
+                        "Core BAF IP": (
+                            dp.is_core_baf_canonical(dp.identify_baf_target(str(row["target"])))
+                            or (str(row["target"]).upper() == "CEBPE")
+                        ),
                         "File Name": row["file_name"],
                     }
                 )

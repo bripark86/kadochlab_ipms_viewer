@@ -62,6 +62,11 @@ KNOWN_CELL_LINES = [
 # 26 core BAF genes (canonical keys)
 BAF_CORE_CANONICAL = tuple(BAF_ALIASES.keys())
 
+# Recognized non-BAF primary baits (filename / metadata target string)
+PRIMARY_TARGET_EXTRA = frozenset({"CEBPE"})
+
+_CEBPE_IN_STEM = re.compile(r"(?:^|[^A-Za-z0-9])CEBPE(?:$|[^A-Za-z0-9])", re.IGNORECASE)
+
 # \b fails for _IgG because '_' is a "word" char in Python. Use delimiter-aware match on full stem.
 _CONTROL_IN_FILENAME = re.compile(
     r"(?:^|[^A-Za-z0-9])(?P<ctrl>igg|mock|control|ev)(?:$|[^A-Za-z0-9])",
@@ -85,6 +90,22 @@ def identify_baf_target(text: str) -> Optional[str]:
         token_norm = norm_token(token)
         if token_norm in ALIAS_LOOKUP:
             return ALIAS_LOOKUP[token_norm]
+    return None
+
+
+def get_biological_target(rem_text: str, stem: str) -> Optional[str]:
+    """
+    Resolve biological bait from filename remainder and full stem.
+    BAF subunits take precedence; then CEBPE; caller applies control / Unknown after.
+    """
+    detected_baf = identify_baf_target(rem_text)
+    if detected_baf:
+        return detected_baf
+    if _CEBPE_IN_STEM.search(stem) or _CEBPE_IN_STEM.search(rem_text):
+        return "CEBPE"
+    parts = [p.upper() for p in re.split(r"[^A-Za-z0-9]+", stem) if p]
+    if "CEBPE" in parts:
+        return "CEBPE"
     return None
 
 
@@ -122,9 +143,9 @@ def extract_metadata(csv_path: Path) -> Dict[str, str]:
     remainder = parts[3:] if len(parts) > 3 else []
     rem_text = "_".join(remainder)
 
-    detected_baf = identify_baf_target(rem_text)
-    if detected_baf:
-        target = detected_baf
+    bio = get_biological_target(rem_text, stem)
+    if bio:
+        target = bio
     elif filename_indicates_control(stem):
         target = "Control (IgG/Mock)"
 
@@ -132,6 +153,8 @@ def extract_metadata(csv_path: Path) -> Dict[str, str]:
     leftovers = []
     for token in remainder:
         if identify_baf_target(token):
+            continue
+        if token.upper() == "CEBPE":
             continue
         if token.upper() in {"IGG", "MOCK", "CONTROL", "EV"}:
             continue
@@ -259,3 +282,27 @@ def summarize_experiment(csv_path: Path) -> pd.DataFrame:
 
 def is_core_baf_canonical(name: Optional[str]) -> bool:
     return name is not None and name in BAF_CORE_CANONICAL
+
+
+def is_primary_target_bait(name: Optional[str]) -> bool:
+    """True if this metadata target is a BAF core bait or an extra primary (e.g. CEBPE)."""
+    if name is None:
+        return False
+    if name in PRIMARY_TARGET_EXTRA:
+        return True
+    return name in BAF_CORE_CANONICAL
+
+
+def resolve_search_as_bait(gene_query: str) -> Optional[str]:
+    """
+    Map a Discovery Hub search term to the indexed bait label in meta_df['target'], if any.
+    """
+    g = (gene_query or "").strip().upper()
+    if not g:
+        return None
+    if g == "CEBPE":
+        return "CEBPE"
+    can = identify_baf_target(g)
+    if is_core_baf_canonical(can):
+        return can
+    return None
