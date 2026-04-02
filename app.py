@@ -1,3 +1,5 @@
+print("--- APP BOOTING ---")
+
 import math
 from pathlib import Path
 
@@ -67,26 +69,31 @@ def section_header(title: str, accent: str = OCEAN_BLUE) -> None:
 
 
 @st.cache_data(show_spinner=False)
-def crawl_library() -> pd.DataFrame:
+def index_library() -> pd.DataFrame:
+    """Path index only — no CSV I/O, no per-file metadata parsing at boot."""
     rows = []
     for p in DATA_ROOT.rglob("*.csv"):
         if "_PROCESSED" in p.name.upper():
             continue
-        meta = dp.extract_metadata(p)
-        rows.append(
-            {
-                "path": str(p),
-                "file_name": p.name,
-                "investigator": meta["investigator"],
-                "session_id": meta["session_id"],
-                "initials": meta["initials"],
-                "target": meta["target"],
-                "cell_line": meta["cell_line"],
-                "sample_label": meta["sample_label"],
-                "full_filename": meta["full_filename"],
-            }
-        )
+        rows.append({"path": str(p), "file_name": p.name, "investigator": p.parent.name})
     return pd.DataFrame(rows)
+
+
+@st.cache_data(show_spinner=False)
+def get_path_metadata(path: str) -> dict:
+    """Filename-based metadata for one path (cached per path)."""
+    return dp.extract_metadata(Path(path))
+
+
+def enrich_manifest(df: pd.DataFrame) -> pd.DataFrame:
+    """Attach extract_metadata columns to manifest rows (lazy)."""
+    if df.empty:
+        return df
+    out_rows = []
+    for _, row in df.iterrows():
+        m = get_path_metadata(str(row["path"]))
+        out_rows.append({**row.to_dict(), **m})
+    return pd.DataFrame(out_rows)
 
 
 @st.cache_data(show_spinner=False)
@@ -181,7 +188,7 @@ def volcano_plot(df: pd.DataFrame, title: str, stats_valid: bool = True) -> go.F
 
 inject_theme()
 st.title("IPMS Viewer")
-meta_df = crawl_library()
+meta_df = index_library()
 if meta_df.empty:
     st.error("No CSV files found in `Data/`.")
     st.stop()
@@ -216,7 +223,8 @@ if st.session_state["active_tab"] == "Dataset Browser":
     if preferred_file in meta_df["file_name"].tolist():
         default_inv = meta_df.loc[meta_df["file_name"] == preferred_file, "investigator"].iloc[0]
     selected_inv = st.selectbox("Investigator", options=investigators, index=investigators.index(default_inv))
-    inv_df = meta_df[meta_df["investigator"] == selected_inv].copy()
+    inv_df_raw = meta_df[meta_df["investigator"] == selected_inv].copy()
+    inv_df = enrich_manifest(inv_df_raw)
     table_df = inv_df[["session_id", "initials", "target", "cell_line", "sample_label", "full_filename"]].rename(
         columns={
             "session_id": "Session ID",
@@ -230,7 +238,8 @@ if st.session_state["active_tab"] == "Dataset Browser":
     if not table_df.empty:
         try:
             st.dataframe(table_df.style.map(highlight_target_cell, subset=["Target"]), use_container_width=True)
-        except Exception:
+        except Exception as e:
+            print(f"Styling failed: {e}")
             st.dataframe(table_df, use_container_width=True)
     else:
         st.info("No experiments available for this investigator.")
@@ -284,10 +293,11 @@ if st.session_state["active_tab"] == "Discovery Hub":
     compare_core = st.toggle("Compare with Core BAF", value=False)
 
     if gene_query:
+        hub_meta = enrich_manifest(meta_df)
         bait_for_consensus = dp.resolve_search_as_bait(gene_query)
 
         if bait_for_consensus is not None:
-            bait_runs = meta_df[meta_df["target"] == bait_for_consensus].copy()
+            bait_runs = hub_meta[hub_meta["target"] == bait_for_consensus].copy()
             st.markdown("### Primary target — enrichment profile")
             if bait_for_consensus == "CEBPE":
                 st.caption(f"Indexed experiments where **CEBPE** is the IP bait (primary target outside the 26 BAF core).")
@@ -336,7 +346,7 @@ if st.session_state["active_tab"] == "Discovery Hub":
         st.markdown("### Global Results")
         rows = []
         prog = st.progress(0)
-        files = meta_df.to_dict(orient="records")
+        files = hub_meta.to_dict(orient="records")
         for i, row in enumerate(files, start=1):
             e = load_experiment_summary(row["path"])
             hit = e[e["Gene Symbol"] == gene_query]
@@ -399,8 +409,8 @@ if st.session_state["active_tab"] == "Comparative Analysis":
     picks = st.multiselect("Choose 2 to 4 experiments", options=meta_df["file_name"].tolist(), max_selections=4)
     if len(picks) == 2:
         a_file, b_file = picks[0], picks[1]
-        a_row = meta_df[meta_df["file_name"] == a_file].iloc[0]
-        b_row = meta_df[meta_df["file_name"] == b_file].iloc[0]
+        a_row = enrich_manifest(meta_df[meta_df["file_name"] == a_file]).iloc[0]
+        b_row = enrich_manifest(meta_df[meta_df["file_name"] == b_file]).iloc[0]
         a_exp = load_and_process_file(a_row["path"])
         a_stats_valid = st.session_state.get("stats_valid", True)
         b_exp = load_and_process_file(b_row["path"])
@@ -461,12 +471,14 @@ if st.session_state["active_tab"] == "Data Management":
             folder.mkdir(parents=True, exist_ok=True)
             for f in uploads:
                 (folder / f.name).write_bytes(f.getvalue())
-            crawl_library.clear()
+            index_library.clear()
+            get_path_metadata.clear()
             load_experiment_summary.clear()
             st.success(f"Saved {len(uploads)} file(s).")
     with c2:
         if st.button("Refresh Metadata"):
-            crawl_library.clear()
+            index_library.clear()
+            get_path_metadata.clear()
             load_experiment_summary.clear()
             st.success("Metadata recrawl enabled.")
 
@@ -482,7 +494,8 @@ if st.session_state["active_tab"] == "Data Management":
         hit = meta_df[meta_df["file_name"] == delete_file].head(1)
         if not hit.empty:
             Path(hit.iloc[0]["path"]).unlink(missing_ok=True)
-            crawl_library.clear()
+            index_library.clear()
+            get_path_metadata.clear()
             load_experiment_summary.clear()
             st.warning(f"Deleted: {delete_file}")
 
