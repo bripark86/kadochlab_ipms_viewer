@@ -104,10 +104,12 @@ def enrich_manifest(df: pd.DataFrame) -> pd.DataFrame:
         rd = row.to_dict()
         sn = rd.get("tmt_sn_sum_column")
         if sn is not None and str(sn).strip() != "" and (not isinstance(sn, float) or not pd.isna(sn)):
+            rd = {**rd}
+            rd.setdefault("experiment_type", "TMT Multiplex")
             out_rows.append(rd)
             continue
         m = get_path_metadata(str(row["path"]))
-        out_rows.append({**rd, **m})
+        out_rows.append({**rd, **m, "experiment_type": "Label-Free"})
     return pd.DataFrame(out_rows)
 
 
@@ -318,13 +320,19 @@ if st.session_state["active_tab"] == "Dataset Browser":
     selected_inv = st.selectbox("Investigator", options=investigators, index=investigators.index(default_inv))
     inv_df_raw = meta_df[meta_df["investigator"] == selected_inv].copy()
     inv_df = enrich_manifest(inv_df_raw)
-    table_df = inv_df[["session_id", "initials", "target", "cell_line", "sample_label", "full_filename"]].rename(
+    if "experiment_type" not in inv_df.columns:
+        inv_df = inv_df.copy()
+        inv_df["experiment_type"] = "Label-Free"
+    browse_cols = ["session_id", "initials", "target", "cell_line", "sample_label", "experiment_type", "full_filename"]
+    browse_cols = [c for c in browse_cols if c in inv_df.columns]
+    table_df = inv_df[browse_cols].rename(
         columns={
             "session_id": "Session ID",
             "initials": "Initials",
             "target": "Target",
             "cell_line": "Cell Line",
             "sample_label": "Sample Label",
+            "experiment_type": "Type",
             "full_filename": "Full Filename",
         }
     )
@@ -455,7 +463,9 @@ if st.session_state["active_tab"] == "Discovery Hub":
         bait_for_consensus = dp.resolve_search_as_bait(gene_query)
 
         if bait_for_consensus is not None:
-            bait_runs = hub_meta[hub_meta["target"] == bait_for_consensus].copy()
+            bait_runs = hub_meta[
+                hub_meta["target"].apply(lambda t: dp.manifest_row_matches_bait(str(t), bait_for_consensus))
+            ].copy()
             st.markdown("### Primary target — enrichment profile")
             if bait_for_consensus == "CEBPE":
                 st.caption(f"Indexed experiments where **CEBPE** is the IP bait (primary target outside the 26 BAF core).")
@@ -508,6 +518,7 @@ if st.session_state["active_tab"] == "Discovery Hub":
         for i, row in enumerate(files, start=1):
             e = load_experiment_summary(row["path"], tmt_sn_col_from_row(row))
             hit = e[e["Gene Symbol"] == gene_query]
+            meta_hit = dp.hub_manifest_row_matches_global_query(row, gene_query)
             if not hit.empty:
                 best = hit.sort_values("Spectral Count", ascending=False).iloc[0]
                 rows.append(
@@ -518,6 +529,22 @@ if st.session_state["active_tab"] == "Discovery Hub":
                         "Exp ID": row["session_id"],
                         "Spectral Count": float(best["Spectral Count"]),
                         "Unique Peptides": int(best["Unique Peptides"]),
+                        "Core BAF IP": (
+                            dp.is_core_baf_canonical(dp.identify_baf_target(str(row["target"])))
+                            or (str(row["target"]).upper() == "CEBPE")
+                        ),
+                        "File Name": row["file_name"],
+                    }
+                )
+            elif meta_hit:
+                rows.append(
+                    {
+                        "Investigator": row["investigator"],
+                        "Target": row["target"],
+                        "Cell Line": row["cell_line"],
+                        "Exp ID": row["session_id"],
+                        "Spectral Count": 0.0,
+                        "Unique Peptides": 0,
                         "Core BAF IP": (
                             dp.is_core_baf_canonical(dp.identify_baf_target(str(row["target"])))
                             or (str(row["target"]).upper() == "CEBPE")

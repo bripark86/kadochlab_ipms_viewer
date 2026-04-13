@@ -309,6 +309,60 @@ def _normalize_tmt_iso_fragment(p: str) -> str:
     return p.upper() if p.isascii() else p
 
 
+_PLATE_CHANNEL_RE = re.compile(r"^\d+[A-Za-z]$")
+
+
+def parse_tmt_virtual_channel_metadata(channel_label: str) -> Optional[Dict[str, str]]:
+    """
+    Map TMT virtual channel display labels (Row-1 short codes) to Cell Line and Target for manifest rows.
+
+    - VOA_* → Cell Line VOA; strip prefix; remainder like BRG1_1 → Target "BRG1 (Rep 1)".
+    - Plate-style labels like 1A → Cell Line JSL_Ref; Target "Channel 1A" (see Requirement 1 example).
+    Returns None if no specialized rule applies (caller keeps filename-based metadata).
+    """
+    ch = (channel_label or "").strip()
+    if not ch:
+        return None
+    bio = ch.split(" | ", 1)[0].strip() if " | " in ch else ch
+    iso = ch.split(" | ", 1)[1].strip() if " | " in ch else ""
+
+    if bio.upper().startswith("VOA_"):
+        cell_line = "VOA"
+        rest = bio[4:] if len(bio) >= 4 else ""
+        rest = rest.strip()
+        if not rest:
+            return {"cell_line": cell_line, "target": "Unknown", "sample_label": iso or "Unknown"}
+        m = re.match(r"^(.+)_(\d+)$", rest)
+        if m:
+            base, rep = m.group(1).strip(), m.group(2).strip()
+            target = f"{base} (Rep {rep})"
+        else:
+            target = rest.replace("_", " ").strip() or "Unknown"
+        return {"cell_line": cell_line, "target": target, "sample_label": iso or "Unknown"}
+
+    if _PLATE_CHANNEL_RE.fullmatch(bio):
+        return {
+            "cell_line": "JSL_Ref",
+            "target": f"Channel {bio}",
+            "sample_label": iso or "Unknown",
+        }
+
+    return None
+
+
+def manifest_row_matches_bait(target_str: str, bait_canonical: str) -> bool:
+    """True if manifest row target string denotes the same bait as bait_canonical (BAF aliases, CEBPE)."""
+    if not bait_canonical:
+        return False
+    t = str(target_str).strip()
+    if bait_canonical == "CEBPE":
+        return "CEBPE" in t.upper()
+    if t == bait_canonical:
+        return True
+    can = identify_baf_target(t)
+    return can == bait_canonical
+
+
 def sn_sum_col_to_channel_label(col: str) -> str:
     """Human-readable channel label; strips trailing sn_sum / 'sn sum' including combined '1A | 127n_sn_sum' forms."""
     s = str(col).strip()
@@ -431,6 +485,15 @@ def build_tmt_manifest_rows(xlsx_path: Path) -> List[Dict[str, Any]]:
     for sn_col in sn_cols:
         ch = sn_sum_col_to_channel_label(sn_col)
         display = f"{xlsx_path.name} | Channel: {ch}"
+        parsed = parse_tmt_virtual_channel_metadata(ch)
+        if parsed:
+            cell_line = parsed["cell_line"]
+            target = parsed["target"]
+            sample_label = parsed.get("sample_label") or base_meta.get("sample_label", "Unknown")
+        else:
+            cell_line = base_meta["cell_line"]
+            target = base_meta["target"]
+            sample_label = base_meta.get("sample_label", "Unknown")
         rows_out.append(
             {
                 "path": str(xlsx_path),
@@ -438,12 +501,13 @@ def build_tmt_manifest_rows(xlsx_path: Path) -> List[Dict[str, Any]]:
                 "investigator": inv,
                 "session_id": base_meta["session_id"],
                 "initials": base_meta["initials"],
-                "target": base_meta["target"],
-                "cell_line": base_meta["cell_line"],
-                "sample_label": base_meta.get("sample_label", "Unknown"),
+                "target": target,
+                "cell_line": cell_line,
+                "sample_label": sample_label,
                 "full_filename": xlsx_path.name,
                 "tmt_channel": ch,
                 "tmt_sn_sum_column": sn_col,
+                "experiment_type": "TMT Multiplex",
             }
         )
     return rows_out
@@ -575,6 +639,32 @@ def is_primary_target_bait(name: Optional[str]) -> bool:
     if name in PRIMARY_TARGET_EXTRA:
         return True
     return name in BAF_CORE_CANONICAL
+
+
+def hub_manifest_row_matches_global_query(row: Dict[str, Any], query: str) -> bool:
+    """
+    True if query appears in manifest metadata (cell line, target, TMT channel, filenames, etc.).
+    Used so Discovery Global Results can find runs by e.g. BRG1 or VOA without a protein hit.
+    Includes canonical BAF bait resolved from the parsed target (e.g. SMARCA4 for BRG1).
+    """
+    q = (query or "").strip().upper()
+    if not q:
+        return False
+    tgt = str(row.get("target", ""))
+    can = identify_baf_target(tgt) or ""
+    parts = [
+        tgt,
+        can,
+        str(row.get("cell_line", "")),
+        str(row.get("tmt_channel", "")),
+        str(row.get("file_name", "")),
+        str(row.get("full_filename", "")),
+        str(row.get("sample_label", "")),
+        str(row.get("investigator", "")),
+        str(row.get("session_id", "")),
+    ]
+    blob = " ".join(parts).upper()
+    return q in blob
 
 
 def resolve_search_as_bait(gene_query: str) -> Optional[str]:
