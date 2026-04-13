@@ -3,6 +3,7 @@ import re
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+import numpy as np
 import pandas as pd
 
 BAF_ALIASES: Dict[str, List[str]] = {
@@ -177,6 +178,149 @@ def extract_metadata(csv_path: Path) -> Dict[str, str]:
     }
 
 
+def infer_tmt_investigator(path: Path) -> str:
+    """If stem matches numeric session pattern, use parent folder; else default JSL."""
+    stem = path.stem
+    parts = stem.split("_")
+    if len(parts) >= 2 and parts[0].isdigit() and parts[1].isdigit():
+        inv = path.parent.name
+        return inv if inv else "JSL"
+    return "JSL"
+
+
+def select_tmt_sheet(xl: pd.ExcelFile) -> str:
+    for name in xl.sheet_names:
+        if "protein_quant_" in name.lower():
+            return name
+    return xl.sheet_names[0]
+
+
+def _find_protein_gene_header_row(preview: pd.DataFrame) -> int:
+    for i in range(len(preview)):
+        cells = [str(preview.iat[i, j]).strip().lower() for j in range(preview.shape[1]) if pd.notna(preview.iat[i, j])]
+        has_pid = any("protein id" in c for c in cells)
+        has_gene = any("gene symbol" in c for c in cells)
+        if has_pid and has_gene:
+            return i
+    return 0
+
+
+def read_tmt_excel_wide(path: Path) -> pd.DataFrame:
+    xl = pd.ExcelFile(path, engine="openpyxl")
+    sheet = select_tmt_sheet(xl)
+    preview = pd.read_excel(path, sheet_name=sheet, header=None, nrows=5, engine="openpyxl")
+    hrow = _find_protein_gene_header_row(preview)
+    df = pd.read_excel(path, sheet_name=sheet, header=hrow, engine="openpyxl")
+    df.columns = [str(c).strip() for c in df.columns]
+    pid_col = resolve_column(df, ["Protein Id", "Protein ID", "Protein"])
+    if not pid_col:
+        raise ValueError("TMT sheet: Protein Id column not found after header detection")
+    df = df.dropna(subset=[pid_col])
+    return df
+
+
+def list_tmt_sn_sum_columns(df: pd.DataFrame) -> List[str]:
+    return [c for c in df.columns if "_sn_sum" in str(c).lower()]
+
+
+def sn_sum_col_to_channel_label(col: str) -> str:
+    s = str(col).strip()
+    low = s.lower()
+    if not low.endswith("_sn_sum"):
+        return s
+    prefix = s[: -len("_sn_sum")].strip()
+    if not prefix:
+        return s
+    if len(prefix) >= 2 and prefix[-1].lower() in "nc" and prefix[-2].isdigit():
+        return prefix[:-1] + prefix[-1].upper()
+    return prefix.upper() if prefix.isascii() else prefix
+
+
+def summarize_tmt_channel(path: Path, sn_sum_col: str, wide_df: Optional[pd.DataFrame] = None) -> pd.DataFrame:
+    """
+    One TMT channel -> same schema as summarize_experiment (gene-level).
+    Spectral Count = sn_sum intensity; synthetic LDA from peptide counts.
+    """
+    df = wide_df if wide_df is not None else read_tmt_excel_wide(path)
+    if sn_sum_col not in df.columns:
+        raise ValueError(f"TMT column not found: {sn_sum_col}")
+
+    gene_col = resolve_column(df, ["Gene Symbol", "Gene", "Symbol"])
+    if not gene_col:
+        raise ValueError("TMT sheet: Gene Symbol column not found")
+
+    pep_col = resolve_column(df, ["No. of peptides", "No Of Peptides", "Number of peptides", "Peptides"])
+    desc_col = resolve_column(df, ["Description", "Protein Description"])
+
+    use = df[[gene_col, sn_sum_col] + [c for c in [pep_col, desc_col] if c]].copy()
+    use[gene_col] = use[gene_col].astype(str).str.strip().str.upper()
+    use = use[(use[gene_col] != "") & (use[gene_col] != "NAN")]
+
+    spec = pd.to_numeric(use[sn_sum_col], errors="coerce").fillna(0.0)
+    use["_spec"] = spec
+
+    if pep_col:
+        npep = pd.to_numeric(use[pep_col], errors="coerce").fillna(0)
+        use["_npep"] = npep
+        use["_lda"] = np.where(use["_npep"] > 1, 0.99, 0.50)
+        use["_upep"] = npep.astype(int)
+    else:
+        use["_lda"] = 0.50
+        use["_upep"] = 0
+
+    agg = (
+        use.groupby(gene_col, dropna=True)
+        .agg(Spectral_Count=("_spec", "sum"), Unique_Peptides=("_upep", "max"), LDA_Probability=("_lda", "mean"))
+        .reset_index()
+        .rename(columns={gene_col: "Gene Symbol"})
+    )
+    agg = agg.rename(columns={"Spectral_Count": "Spectral Count", "LDA_Probability": "LDA Probability", "Unique_Peptides": "Unique Peptides"})
+    ch_label = sn_sum_col_to_channel_label(sn_sum_col)
+    agg["TMT_Channel"] = ch_label
+    return agg.sort_values("Spectral Count", ascending=False)
+
+
+def build_tmt_manifest_rows(xlsx_path: Path) -> List[Dict[str, Any]]:
+    """
+    One .xlsx -> one manifest row per TMT channel (virtual experiments).
+    """
+    wide = read_tmt_excel_wide(xlsx_path)
+    sn_cols = list_tmt_sn_sum_columns(wide)
+    if not sn_cols:
+        return []
+
+    base_meta = extract_metadata(xlsx_path)
+    inv = infer_tmt_investigator(xlsx_path)
+    rows_out: List[Dict[str, Any]] = []
+    for sn_col in sn_cols:
+        ch = sn_sum_col_to_channel_label(sn_col)
+        display = f"{xlsx_path.name} | Channel: {ch}"
+        rows_out.append(
+            {
+                "path": str(xlsx_path),
+                "file_name": display,
+                "investigator": inv,
+                "session_id": base_meta["session_id"],
+                "initials": base_meta["initials"],
+                "target": base_meta["target"],
+                "cell_line": base_meta["cell_line"],
+                "sample_label": base_meta.get("sample_label", "Unknown"),
+                "full_filename": xlsx_path.name,
+                "tmt_channel": ch,
+                "tmt_sn_sum_column": sn_col,
+            }
+        )
+    return rows_out
+
+
+def summarize_experiment_any(path: Path, tmt_sn_sum_column: Optional[str] = None) -> pd.DataFrame:
+    if path.suffix.lower() == ".xlsx":
+        if not tmt_sn_sum_column:
+            return pd.DataFrame(columns=["Gene Symbol", "Spectral Count", "Unique Peptides", "LDA Probability"])
+        return summarize_tmt_channel(path, tmt_sn_sum_column)
+    return summarize_experiment(path)
+
+
 def read_csv_flexible(csv_path: Path) -> pd.DataFrame:
     raw = csv_path.read_text(errors="ignore")
     lines = raw.splitlines()
@@ -215,6 +359,10 @@ def compute_qc_metrics(csv_path: Path) -> Dict[str, Any]:
         "flatline_significance": False,
         "warnings": [],
     }
+
+    if csv_path.suffix.lower() == ".xlsx":
+        out["warnings"].append("TMT multiplex: open a channel in Dataset Browser for per-channel QC-style stats.")
+        return out
 
     try:
         df = read_csv_flexible(csv_path)

@@ -2,6 +2,7 @@ print("--- APP BOOTING ---")
 
 import math
 from pathlib import Path
+from typing import Any, Dict, Optional, Union
 
 import numpy as np
 import pandas as pd
@@ -70,12 +71,20 @@ def section_header(title: str, accent: str = OCEAN_BLUE) -> None:
 
 @st.cache_data(show_spinner=False)
 def index_library() -> pd.DataFrame:
-    """Path index only — no CSV I/O, no per-file metadata parsing at boot."""
+    """Index CSV paths only; expand each .xlsx into one row per TMT channel (filename parse only for CSV)."""
     rows = []
     for p in DATA_ROOT.rglob("*.csv"):
         if "_PROCESSED" in p.name.upper():
             continue
         rows.append({"path": str(p), "file_name": p.name, "investigator": p.parent.name})
+    for p in DATA_ROOT.rglob("*.xlsx"):
+        if "_PROCESSED" in p.name.upper():
+            continue
+        try:
+            tmt_rows = dp.build_tmt_manifest_rows(p)
+            rows.extend(tmt_rows)
+        except Exception as exc:
+            print(f"TMT manifest skipped for {p}: {exc}")
     return pd.DataFrame(rows)
 
 
@@ -86,23 +95,40 @@ def get_path_metadata(path: str) -> dict:
 
 
 def enrich_manifest(df: pd.DataFrame) -> pd.DataFrame:
-    """Attach extract_metadata columns to manifest rows (lazy)."""
+    """Attach extract_metadata columns to manifest rows (lazy). TMT rows are already complete."""
     if df.empty:
         return df
     out_rows = []
     for _, row in df.iterrows():
+        rd = row.to_dict()
+        sn = rd.get("tmt_sn_sum_column")
+        if sn is not None and str(sn).strip() != "" and (not isinstance(sn, float) or not pd.isna(sn)):
+            out_rows.append(rd)
+            continue
         m = get_path_metadata(str(row["path"]))
-        out_rows.append({**row.to_dict(), **m})
+        out_rows.append({**rd, **m})
     return pd.DataFrame(out_rows)
 
 
 @st.cache_data(show_spinner=False)
-def load_experiment_summary(path: str) -> pd.DataFrame:
-    return dp.summarize_experiment(Path(path))
+def load_experiment_summary(path: str, tmt_sn_sum_column: Optional[str] = None) -> pd.DataFrame:
+    return dp.summarize_experiment_any(Path(path), tmt_sn_sum_column)
 
 
-def load_and_process_file(path: str) -> pd.DataFrame:
-    df = load_experiment_summary(path).copy()
+def tmt_sn_col_from_row(row: Union[pd.Series, Dict[str, Any]]) -> Optional[str]:
+    if isinstance(row, dict):
+        v = row.get("tmt_sn_sum_column")
+    else:
+        if "tmt_sn_sum_column" not in row.index:
+            return None
+        v = row.get("tmt_sn_sum_column")
+    if v is None or (isinstance(v, float) and pd.isna(v)) or str(v).strip() == "":
+        return None
+    return str(v).strip()
+
+
+def load_and_process_file(path: str, tmt_sn_sum_column: Optional[str] = None) -> pd.DataFrame:
+    df = load_experiment_summary(path, tmt_sn_sum_column).copy()
     lda = pd.to_numeric(df["LDA Probability"], errors="coerce")
     valid_lda = (lda > 0) & (lda <= 1)
     y_axis = np.full(len(df), np.nan, dtype=float)
@@ -131,7 +157,12 @@ def highlight_target_cell(val: str) -> str:
     return f"background-color: {SOFT_BLUE}; color: {TEXT_DARK};"
 
 
-def volcano_plot(df: pd.DataFrame, title: str, stats_valid: bool = True) -> go.Figure:
+def volcano_plot(
+    df: pd.DataFrame,
+    title: str,
+    stats_valid: bool = True,
+    x_axis_title: str = "Log10(Spectral Count + 1)",
+) -> go.Figure:
     plot_df = df.copy()
     plot_df["is_baf"] = plot_df["Gene Symbol"].apply(is_baf_gene)
     plot_df["x"] = plot_df["Spectral Count"].apply(lambda v: math.log10(float(v) + 1))
@@ -180,7 +211,7 @@ def volcano_plot(df: pd.DataFrame, title: str, stats_valid: bool = True) -> go.F
                 showlegend=True,
             )
         )
-    fig.update_layout(title=title, xaxis_title="Log10(Spectral Count + 1)", yaxis_title="-Log10(LDA Probability)", plot_bgcolor=BG_WHITE, paper_bgcolor=BG_WHITE)
+    fig.update_layout(title=title, xaxis_title=x_axis_title, yaxis_title="-Log10(LDA Probability)", plot_bgcolor=BG_WHITE, paper_bgcolor=BG_WHITE)
     if not stats_valid:
         fig.update_yaxes(range=[0, 1])
     return fig
@@ -190,7 +221,7 @@ inject_theme()
 st.title("IPMS Viewer")
 meta_df = index_library()
 if meta_df.empty:
-    st.error("No CSV files found in `Data/`.")
+    st.error("No CSV or Excel files found in `Data/`.")
     st.stop()
 
 if "quick_open_file" not in st.session_state:
@@ -251,14 +282,26 @@ if st.session_state["active_tab"] == "Dataset Browser":
     st.session_state["selected_file"] = selected_file
     selected_row = inv_df[inv_df["file_name"] == selected_file].iloc[0]
     st.session_state["qc_path"] = selected_row["path"]
-    exp = load_and_process_file(selected_row["path"])
+    tmt_sn = tmt_sn_col_from_row(selected_row)
+    is_tmt = tmt_sn is not None
+    try:
+        exp = load_and_process_file(selected_row["path"], tmt_sn)
+    except Exception as exc:
+        st.error(f"TMT / file load failed: {exc}")
+        exp = pd.DataFrame(columns=["Gene Symbol", "Spectral Count", "Unique Peptides", "LDA Probability"])
+    if is_tmt:
+        st.caption("📍 Mode: TMT Multiplexed Data")
+    if exp.empty:
+        st.warning("No quantitative rows loaded for this selection.")
     exp["is_baf"] = exp["Gene Symbol"].apply(is_baf_gene)
 
-    total_proteins = int(exp["Gene Symbol"].nunique())
-    baf_ranked = exp[exp["is_baf"]].sort_values("Spectral Count", ascending=False)
-    baf_count = int(baf_ranked["Gene Symbol"].nunique())
+    total_proteins = int(exp["Gene Symbol"].nunique()) if not exp.empty else 0
+    baf_ranked = exp[exp["is_baf"]].sort_values("Spectral Count", ascending=False) if not exp.empty else exp
+    baf_count = int(baf_ranked["Gene Symbol"].nunique()) if not baf_ranked.empty else 0
     bait_label = str(selected_row["target"])
-    if bait_label in ("Unknown", "Control (IgG/Mock)"):
+    if exp.empty:
+        top_inter = pd.Series(dtype=object)
+    elif bait_label in ("Unknown", "Control (IgG/Mock)"):
         top_inter = exp.sort_values("Spectral Count", ascending=False)["Gene Symbol"].head(1)
     else:
         top_inter = exp[exp["Gene Symbol"] != bait_label.upper()].sort_values("Spectral Count", ascending=False)["Gene Symbol"].head(1)
@@ -268,22 +311,32 @@ if st.session_state["active_tab"] == "Dataset Browser":
     m2.metric("BAF Subunits (Ranked)", f"{baf_count}/26")
     m3.metric("Top Interactor", top_interactor)
 
-    st.plotly_chart(volcano_plot(exp, "Experiment Scatter", stats_valid=st.session_state["stats_valid"]), use_container_width=True)
+    x_title = "Summed Signal-to-Noise (TMT)" if is_tmt else "Log10(Spectral Count + 1)"
+    if not exp.empty:
+        st.plotly_chart(
+            volcano_plot(exp, "Experiment Scatter", stats_valid=st.session_state["stats_valid"], x_axis_title=x_title),
+            use_container_width=True,
+        )
 
     coverage = exp.copy()
-    coverage["canonical"] = coverage["Gene Symbol"].apply(lambda g: dp.identify_baf_target(g) or "")
-    coverage = coverage[coverage["canonical"] != ""].groupby("canonical", as_index=False)["Spectral Count"].sum()
-    missing = [x for x in dp.BAF_CORE_CANONICAL if x not in coverage["canonical"].tolist()]
-    if missing:
-        coverage = pd.concat([coverage, pd.DataFrame({"canonical": missing, "Spectral Count": [0] * len(missing)})], ignore_index=True)
-    coverage = coverage.sort_values("Spectral Count", ascending=False)
-    cov_fig = px.bar(coverage, x="Spectral Count", y="canonical", orientation="h", title="Complex Coverage (BAF Core)", color_discrete_sequence=[BAF_RED])
-    cov_fig.update_yaxes(autorange="reversed")
-    cov_fig.update_layout(plot_bgcolor=BG_WHITE, paper_bgcolor=BG_WHITE)
-    st.plotly_chart(cov_fig, use_container_width=True)
+    if not exp.empty:
+        coverage["canonical"] = coverage["Gene Symbol"].apply(lambda g: dp.identify_baf_target(g) or "")
+        coverage = coverage[coverage["canonical"] != ""].groupby("canonical", as_index=False)["Spectral Count"].sum()
+        missing = [x for x in dp.BAF_CORE_CANONICAL if x not in coverage["canonical"].tolist()]
+        if missing:
+            coverage = pd.concat([coverage, pd.DataFrame({"canonical": missing, "Spectral Count": [0] * len(missing)})], ignore_index=True)
+        coverage = coverage.sort_values("Spectral Count", ascending=False)
+        cov_fig = px.bar(coverage, x="Spectral Count", y="canonical", orientation="h", title="Complex Coverage (BAF Core)", color_discrete_sequence=[BAF_RED])
+        cov_fig.update_yaxes(autorange="reversed")
+        cov_x = "Summed Signal-to-Noise (TMT)" if is_tmt else "Spectral Count"
+        cov_fig.update_layout(plot_bgcolor=BG_WHITE, paper_bgcolor=BG_WHITE, xaxis_title=cov_x)
+        st.plotly_chart(cov_fig, use_container_width=True)
     with st.expander("📂 View Raw Experiment Data", expanded=False):
-        raw_df = exp.sort_values("Spectral Count", ascending=False).reset_index(drop=True)
-        st.dataframe(raw_df, use_container_width=True)
+        if exp.empty:
+            st.caption("No rows to display.")
+        else:
+            raw_df = exp.sort_values("Spectral Count", ascending=False).reset_index(drop=True)
+            st.dataframe(raw_df, use_container_width=True)
 
 if st.session_state["active_tab"] == "Discovery Hub":
     section_header("Discovery Hub", OCEAN_BLUE)
@@ -325,7 +378,7 @@ if st.session_state["active_tab"] == "Discovery Hub":
             if not bait_runs.empty:
                 all_rows = []
                 for _, row in bait_runs.iterrows():
-                    e = load_experiment_summary(row["path"]).copy()
+                    e = load_experiment_summary(row["path"], tmt_sn_col_from_row(row)).copy()
                     e["exp_id"] = row["session_id"]
                     all_rows.append(e)
                 merged_c = pd.concat(all_rows, ignore_index=True)
@@ -348,7 +401,7 @@ if st.session_state["active_tab"] == "Discovery Hub":
         prog = st.progress(0)
         files = hub_meta.to_dict(orient="records")
         for i, row in enumerate(files, start=1):
-            e = load_experiment_summary(row["path"])
+            e = load_experiment_summary(row["path"], tmt_sn_col_from_row(row))
             hit = e[e["Gene Symbol"] == gene_query]
             if not hit.empty:
                 best = hit.sort_values("Spectral Count", ascending=False).iloc[0]
@@ -411,15 +464,24 @@ if st.session_state["active_tab"] == "Comparative Analysis":
         a_file, b_file = picks[0], picks[1]
         a_row = enrich_manifest(meta_df[meta_df["file_name"] == a_file]).iloc[0]
         b_row = enrich_manifest(meta_df[meta_df["file_name"] == b_file]).iloc[0]
-        a_exp = load_and_process_file(a_row["path"])
+        a_sn, b_sn = tmt_sn_col_from_row(a_row), tmt_sn_col_from_row(b_row)
+        a_exp = load_and_process_file(a_row["path"], a_sn)
         a_stats_valid = st.session_state.get("stats_valid", True)
-        b_exp = load_and_process_file(b_row["path"])
+        b_exp = load_and_process_file(b_row["path"], b_sn)
         b_stats_valid = st.session_state.get("stats_valid", True)
+        xa = "Summed Signal-to-Noise (TMT)" if a_sn else "Log10(Spectral Count + 1)"
+        xb = "Summed Signal-to-Noise (TMT)" if b_sn else "Log10(Spectral Count + 1)"
         c1, c2 = st.columns(2)
         with c1:
-            st.plotly_chart(volcano_plot(a_exp, f"Scatter: {a_file}", stats_valid=a_stats_valid), use_container_width=True)
+            st.plotly_chart(
+                volcano_plot(a_exp, f"Scatter: {a_file}", stats_valid=a_stats_valid, x_axis_title=xa),
+                use_container_width=True,
+            )
         with c2:
-            st.plotly_chart(volcano_plot(b_exp, f"Scatter: {b_file}", stats_valid=b_stats_valid), use_container_width=True)
+            st.plotly_chart(
+                volcano_plot(b_exp, f"Scatter: {b_file}", stats_valid=b_stats_valid, x_axis_title=xb),
+                use_container_width=True,
+            )
 
         df1 = a_exp[["Gene Symbol", "Spectral Count"]]
         df2 = b_exp[["Gene Symbol", "Spectral Count"]]
@@ -444,7 +506,9 @@ if st.session_state["active_tab"] == "Comparative Analysis":
         subset = meta_df[meta_df["file_name"].isin(picks)].copy()
         merged = None
         for _, row in subset.iterrows():
-            e = load_experiment_summary(row["path"])[["Gene Symbol", "Spectral Count"]].rename(columns={"Spectral Count": row["file_name"]})
+            e = load_experiment_summary(row["path"], tmt_sn_col_from_row(row))[
+                ["Gene Symbol", "Spectral Count"]
+            ].rename(columns={"Spectral Count": row["file_name"]})
             merged = e if merged is None else merged.merge(e, on="Gene Symbol", how="outer")
         if merged is not None:
             merged = merged.fillna(0)
@@ -465,7 +529,7 @@ if st.session_state["active_tab"] == "Data Management":
     c1, c2 = st.columns([2, 1])
     with c1:
         upload_target = st.selectbox("Upload target investigator folder", options=sorted(meta_df["investigator"].unique().tolist()))
-        uploads = st.file_uploader("Upload CSV files", type=["csv"], accept_multiple_files=True)
+        uploads = st.file_uploader("Upload CSV or Excel files", type=["csv", "xlsx"], accept_multiple_files=True)
         if st.button("Save Uploads") and uploads:
             folder = DATA_ROOT / upload_target
             folder.mkdir(parents=True, exist_ok=True)
