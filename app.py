@@ -245,7 +245,7 @@ def tmt_ma_scatter_figure(ma_df: pd.DataFrame, title: str) -> go.Figure:
         sub = work[work["_cls"] == label]
         if sub.empty:
             continue
-        fc_sub = np.to_numeric(sub["fold_change"], errors="coerce")
+        fc_sub = pd.to_numeric(sub["fold_change"], errors="coerce")
         fig.add_trace(
             go.Scatter(
                 x=sub["x_avg_log10"],

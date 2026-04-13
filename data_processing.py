@@ -346,7 +346,7 @@ def build_tmt_ma_comparison_df(
     sub = wide_df.loc[mask].copy()
     gser = genes[mask]
 
-    num = sub[all_c].apply(pd.to_numeric, errors="coerce")
+    num = pd.DataFrame({c: pd.to_numeric(sub[c], errors="coerce") for c in all_c}, index=sub.index)
     log_block = np.log10(num.clip(lower=eps))
     x_avg = log_block.mean(axis=1)
     mean_r = num[ref].mean(axis=1)
