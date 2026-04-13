@@ -1,5 +1,6 @@
 print("--- APP BOOTING ---")
 
+import hashlib
 import math
 from pathlib import Path
 from typing import Any, Dict, Optional, Union
@@ -217,6 +218,67 @@ def volcano_plot(
     return fig
 
 
+@st.cache_data(show_spinner=False)
+def load_tmt_wide_cached(path: str) -> pd.DataFrame:
+    return dp.read_tmt_excel_wide(Path(path))
+
+
+def tmt_ma_scatter_figure(ma_df: pd.DataFrame, title: str) -> go.Figure:
+    """MA-style comparison: BAF = red, CEBPE = teal, others = ocean blue."""
+    fig = go.Figure()
+    if ma_df.empty:
+        fig.update_layout(title=title, plot_bgcolor=BG_WHITE, paper_bgcolor=BG_WHITE)
+        return fig
+
+    def cls_for(g: str) -> str:
+        u = str(g).upper()
+        if u == "CEBPE":
+            return "CEBPE"
+        if dp.identify_baf_target(str(g)):
+            return "BAF subunit"
+        return "Other"
+
+    work = ma_df.copy()
+    work["_cls"] = work["Gene Symbol"].map(cls_for)
+
+    for label, color in (("Other", OCEAN_BLUE), ("BAF subunit", BAF_RED), ("CEBPE", CEBPE_TEAL)):
+        sub = work[work["_cls"] == label]
+        if sub.empty:
+            continue
+        fc_sub = np.to_numeric(sub["fold_change"], errors="coerce")
+        fig.add_trace(
+            go.Scatter(
+                x=sub["x_avg_log10"],
+                y=sub["y_log2_ratio"],
+                mode="markers",
+                name=label,
+                marker={"size": 9, "color": color, "opacity": 0.75},
+                text=sub["Gene Symbol"],
+                customdata=np.column_stack(
+                    [sub["Gene Symbol"].astype(str), sub["hover_conditions"].astype(str), fc_sub]
+                ),
+                hovertemplate=(
+                    "<b>%{text}</b><br>"
+                    "Biological condition: %{customdata[1]}<br>"
+                    "Fold change (mean T / mean R): %{customdata[2]:.3f}<br>"
+                    "Avg log10(intensity): %{x:.4f}<br>"
+                    "log2(T/R): %{y:.4f}"
+                    "<extra></extra>"
+                ),
+            )
+        )
+
+    fig.update_layout(
+        title=title,
+        xaxis_title="Average log10 (all selected channels)",
+        yaxis_title="log2(mean target / mean reference)",
+        plot_bgcolor=BG_WHITE,
+        paper_bgcolor=BG_WHITE,
+        legend={"orientation": "h", "yanchor": "bottom", "y": 1.02},
+    )
+    return fig
+
+
 inject_theme()
 st.title("IPMS Viewer")
 meta_df = index_library()
@@ -337,6 +399,49 @@ if st.session_state["active_tab"] == "Dataset Browser":
         else:
             raw_df = exp.sort_values("Spectral Count", ascending=False).reset_index(drop=True)
             st.dataframe(raw_df, use_container_width=True)
+
+    xlsx_path = Path(selected_row["path"])
+    wide_ma: Optional[pd.DataFrame] = None
+    channel_opts: list = []
+    ref_sel: list = []
+    tgt_sel: list = []
+    if xlsx_path.suffix.lower() == ".xlsx":
+        with st.sidebar:
+            st.markdown("---")
+            st.markdown("**TMT comparison (MA)**")
+            try:
+                wide_ma = load_tmt_wide_cached(str(xlsx_path))
+                channel_opts = dp.list_tmt_sn_sum_columns(wide_ma)
+            except Exception as exc:
+                st.caption(f"Could not load wide sheet for comparison: {exc}")
+            if channel_opts:
+                sid = hashlib.md5(str(xlsx_path).encode()).hexdigest()[:12]
+                ref_sel = st.multiselect(
+                    "Reference channels (e.g. IgG)",
+                    options=channel_opts,
+                    key=f"tmt_ma_ref_{sid}",
+                )
+                tgt_sel = st.multiselect(
+                    "Target channels (e.g. BRG1)",
+                    options=channel_opts,
+                    key=f"tmt_ma_tgt_{sid}",
+                )
+            else:
+                st.caption("No _sn_sum channel columns found.")
+
+        if wide_ma is not None and ref_sel and tgt_sel:
+            st.markdown("#### TMT comparison (MA plot)")
+            try:
+                ma_df = dp.build_tmt_ma_comparison_df(wide_ma, ref_sel, tgt_sel)
+                st.plotly_chart(
+                    tmt_ma_scatter_figure(
+                        ma_df,
+                        f"MA: {xlsx_path.name} — reference vs target channels",
+                    ),
+                    use_container_width=True,
+                )
+            except Exception as exc:
+                st.error(f"TMT comparison plot failed: {exc}")
 
 if st.session_state["active_tab"] == "Discovery Hub":
     section_header("Discovery Hub", OCEAN_BLUE)

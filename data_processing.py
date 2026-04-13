@@ -195,45 +195,181 @@ def select_tmt_sheet(xl: pd.ExcelFile) -> str:
     return xl.sheet_names[0]
 
 
-def _find_protein_gene_header_row(preview: pd.DataFrame) -> int:
-    for i in range(len(preview)):
+def _find_tmt_header_row(preview: pd.DataFrame) -> int:
+    """
+    Prefer a row containing both Protein Id and Gene Symbol; else first row with Protein Id
+    (Jessica_StL two-row header: short codes on row above).
+    """
+    max_r = min(5, len(preview))
+    best_pid_only: Optional[int] = None
+    for i in range(max_r):
         cells = [str(preview.iat[i, j]).strip().lower() for j in range(preview.shape[1]) if pd.notna(preview.iat[i, j])]
         has_pid = any("protein id" in c for c in cells)
         has_gene = any("gene symbol" in c for c in cells)
         if has_pid and has_gene:
             return i
-    return 0
+        if has_pid and best_pid_only is None:
+            best_pid_only = i
+    return best_pid_only if best_pid_only is not None else 0
+
+
+_SN_SUM_TAIL = re.compile(r"[_\s]sn[_\s]sum\s*$", re.IGNORECASE)
+
+
+def is_tmt_sn_sum_column(name: str) -> bool:
+    """Strict TMT intensity: ends with sn sum / sn_sum; excludes scaled columns."""
+    s = str(name).strip()
+    low = s.lower().replace(" ", "_")
+    if "scaled" in low:
+        return False
+    return bool(_SN_SUM_TAIL.search(s.replace(" ", "_")))
+
+
+def assemble_tmt_column_names(full: pd.DataFrame, hrow: int) -> List[str]:
+    """Merge row above header (short codes like 1A, VOA_BRG1) with channel row for sn-sum columns."""
+    n = int(full.shape[1])
+    header_vals = [full.iat[hrow, j] if j < full.shape[1] else "" for j in range(n)]
+    code_vals = [full.iat[hrow - 1, j] if hrow > 0 and j < full.shape[1] else "" for j in range(n)]
+    new_cols: List[str] = []
+    for j in range(n):
+        base = str(header_vals[j]).strip() if pd.notna(header_vals[j]) else ""
+        code_raw = code_vals[j]
+        code = str(code_raw).strip() if pd.notna(code_raw) else ""
+        if code.lower() in ("nan", "none"):
+            code = ""
+        if base and is_tmt_sn_sum_column(base):
+            if code:
+                new_cols.append(f"{code} | {base}")
+            else:
+                new_cols.append(base)
+        else:
+            new_cols.append(base if base else f"Unnamed_{j}")
+    return new_cols
+
+
+def tmt_short_label_from_column(col: str) -> str:
+    """Biological / short-code label from Row 1 (before ' | ')."""
+    s = str(col).strip()
+    if " | " in s:
+        return s.split(" | ", 1)[0].strip()
+    return ""
 
 
 def read_tmt_excel_wide(path: Path) -> pd.DataFrame:
     xl = pd.ExcelFile(path, engine="openpyxl")
     sheet = select_tmt_sheet(xl)
-    preview = pd.read_excel(path, sheet_name=sheet, header=None, nrows=5, engine="openpyxl")
-    hrow = _find_protein_gene_header_row(preview)
-    df = pd.read_excel(path, sheet_name=sheet, header=hrow, engine="openpyxl")
-    df.columns = [str(c).strip() for c in df.columns]
+    full = pd.read_excel(path, sheet_name=sheet, header=None, engine="openpyxl")
+    if full.empty:
+        return pd.DataFrame()
+    preview = full.iloc[: min(5, len(full)), :]
+    hrow = _find_tmt_header_row(preview)
+    new_cols = assemble_tmt_column_names(full, hrow)
+    df = full.iloc[hrow + 1 :].copy()
+    n = min(len(new_cols), df.shape[1])
+    df = df.iloc[:, :n].copy()
+    df.columns = new_cols[:n]
+
     pid_col = resolve_column(df, ["Protein Id", "Protein ID", "Protein"])
     if not pid_col:
         raise ValueError("TMT sheet: Protein Id column not found after header detection")
     df = df.dropna(subset=[pid_col])
+
+    gene_col = resolve_column(df, ["Gene Symbol", "Gene", "Symbol"])
+    desc_col = resolve_column(df, ["Description", "Protein Description"])
+    pep_col = resolve_column(df, ["No. of peptides", "No Of Peptides", "Number of peptides", "Peptides"])
+    id_keep = [c for c in [pid_col, gene_col, desc_col, pep_col] if c and c in df.columns]
+    sig_cols = [c for c in df.columns if is_tmt_sn_sum_column(c)]
+    if not sig_cols:
+        raise ValueError("TMT sheet: no _sn_sum intensity columns found (scaled columns are ignored)")
+    if not gene_col or gene_col not in df.columns:
+        raise ValueError("TMT sheet: Gene Symbol column not found")
+    df = df[[c for c in id_keep if c in df.columns] + [c for c in sig_cols if c not in id_keep]].copy()
+
+    num_sig = df[sig_cols].apply(pd.to_numeric, errors="coerce")
+    arr = num_sig.replace(0, np.nan).to_numpy(dtype=float).ravel()
+    pos = arr[(arr > 0) & np.isfinite(arr)]
+    repl = float(np.nanmin(pos)) if pos.size else 1.0
+    for c in sig_cols:
+        colv = pd.to_numeric(df[c], errors="coerce")
+        colv = colv.where(colv != 0, repl)
+        colv = colv.fillna(repl)
+        df[c] = colv
     return df
 
 
 def list_tmt_sn_sum_columns(df: pd.DataFrame) -> List[str]:
-    return [c for c in df.columns if "_sn_sum" in str(c).lower()]
+    return [c for c in df.columns if is_tmt_sn_sum_column(c)]
+
+
+def _normalize_tmt_iso_fragment(p: str) -> str:
+    if not p:
+        return p
+    if len(p) >= 2 and p[-1].lower() in "nc" and p[-2].isdigit():
+        return p[:-1] + p[-1].upper()
+    return p.upper() if p.isascii() else p
 
 
 def sn_sum_col_to_channel_label(col: str) -> str:
+    """Human-readable channel label; strips trailing sn_sum / 'sn sum' including combined '1A | 127n_sn_sum' forms."""
     s = str(col).strip()
-    low = s.lower()
-    if not low.endswith("_sn_sum"):
-        return s
-    prefix = s[: -len("_sn_sum")].strip()
-    if not prefix:
-        return s
-    if len(prefix) >= 2 and prefix[-1].lower() in "nc" and prefix[-2].isdigit():
-        return prefix[:-1] + prefix[-1].upper()
-    return prefix.upper() if prefix.isascii() else prefix
+    if " | " in s:
+        left, right = s.split(" | ", 1)
+        rnorm = _SN_SUM_TAIL.sub("", right.strip().replace(" ", "_")).strip("_")
+        rnorm = _normalize_tmt_iso_fragment(rnorm) if rnorm else ""
+        return f"{left.strip()} | {rnorm}".strip(" |") if rnorm else left.strip()
+    rnorm = _SN_SUM_TAIL.sub("", s.replace(" ", "_")).strip("_")
+    return _normalize_tmt_iso_fragment(rnorm) if rnorm else s
+
+
+def build_tmt_ma_comparison_df(
+    wide_df: pd.DataFrame,
+    reference_columns: List[str],
+    target_columns: List[str],
+    eps: float = 1e-12,
+) -> pd.DataFrame:
+    """
+    TMT comparison (MA-style): X = mean(log10 intensity) over all selected channels (ref ∪ target);
+    Y = log2(mean(target) / mean(reference)).
+    """
+    empty_cols = ["Gene Symbol", "x_avg_log10", "y_log2_ratio", "fold_change", "hover_conditions", "ref_labels", "tgt_labels"]
+    gene_col = resolve_column(wide_df, ["Gene Symbol", "Gene", "Symbol"])
+    if not gene_col:
+        return pd.DataFrame(columns=empty_cols)
+    ref = [c for c in reference_columns if c in wide_df.columns]
+    tgt = [c for c in target_columns if c in wide_df.columns]
+    if not ref or not tgt:
+        return pd.DataFrame(columns=empty_cols)
+
+    all_c = list(dict.fromkeys(ref + tgt))
+    genes = wide_df[gene_col].astype(str).str.strip().str.upper()
+    mask = (genes != "") & (genes != "NAN")
+    sub = wide_df.loc[mask].copy()
+    gser = genes[mask]
+
+    num = sub[all_c].apply(pd.to_numeric, errors="coerce")
+    log_block = np.log10(num.clip(lower=eps))
+    x_avg = log_block.mean(axis=1)
+    mean_r = num[ref].mean(axis=1)
+    mean_t = num[tgt].mean(axis=1)
+    ratio = mean_t / (mean_r + eps)
+    y_m = np.log2(np.maximum(ratio, eps))
+
+    ref_labs = ", ".join(sorted({tmt_short_label_from_column(c) for c in ref if tmt_short_label_from_column(c)}))
+    tgt_labs = ", ".join(sorted({tmt_short_label_from_column(c) for c in tgt if tmt_short_label_from_column(c)}))
+    hover_bio = f"Ref: {ref_labs or '—'} | Tgt: {tgt_labs or '—'}"
+
+    out = pd.DataFrame(
+        {
+            "Gene Symbol": gser.values,
+            "x_avg_log10": x_avg.values,
+            "y_log2_ratio": y_m.values,
+            "fold_change": ratio.values,
+            "hover_conditions": hover_bio,
+            "ref_labels": ref_labs,
+            "tgt_labels": tgt_labs,
+        }
+    )
+    return out.replace([np.inf, -np.inf], np.nan).dropna(subset=["Gene Symbol", "x_avg_log10", "y_log2_ratio"])
 
 
 def summarize_tmt_channel(path: Path, sn_sum_col: str, wide_df: Optional[pd.DataFrame] = None) -> pd.DataFrame:
