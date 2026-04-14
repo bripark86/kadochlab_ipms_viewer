@@ -312,6 +312,64 @@ def _normalize_tmt_iso_fragment(p: str) -> str:
 _PLATE_CHANNEL_RE = re.compile(r"^[0-9]{1,2}[A-Za-z]$")
 
 
+def _tmt_core_between_first_last_underscore(s: str) -> Optional[str]:
+    """Substring strictly between the first and last ``_`` in *s* (None if not applicable)."""
+    s = (s or "").strip()
+    first = s.find("_")
+    last = s.rfind("_")
+    if first == -1 or last == -1 or first >= last:
+        return None
+    mid = s[first + 1 : last].strip()
+    return mid if mid else None
+
+
+def _tmt_format_plus_bait_label(core: str) -> str:
+    """e.g. ``ARID1A+_BRG1`` → ``ARID1A + BRG1``."""
+    t = (core or "").strip()
+    t = t.replace("+_", " + ").replace("_+", " + ")
+    if "+" in t and " + " not in t:
+        t = re.sub(r"\+", " + ", t, count=1)
+    t = re.sub(r"\s+", " ", t.replace("_", " ")).strip()
+    return t
+
+
+def _tmt_target_from_bio(bio: str) -> str:
+    """
+    Fine-grained target from Row-1 label (before ``|``).
+
+    - IgG → IgG Control.
+    - ARID1A + BRG1 style (``ARID1A+_BRG1`` in label) → ``ARID1A + BRG1``.
+    - BRG1-only multiplex (e.g. ``VOA_BRG1_2``) → ``BRG1`` (distinct from dual-bait rows).
+    - Else: core between first/last underscores, or humanized full label.
+    """
+    bio = (bio or "").strip()
+    if not bio:
+        return "Unknown"
+    bio_u = bio.upper()
+    mid = _tmt_core_between_first_last_underscore(bio)
+
+    if "IGG" in bio_u:
+        return "IgG Control"
+    if "ARID1A" in bio_u and "BRG1" in bio_u:
+        core = mid if mid else bio
+        return _tmt_format_plus_bait_label(core)
+    if "BRG1" in bio_u:
+        return "BRG1"
+    if _PLATE_CHANNEL_RE.fullmatch(bio):
+        return f"TMT Reference {bio}"
+    if bio_u.startswith("VOA_"):
+        rest = bio[4:].strip() if len(bio) >= 4 else ""
+        if not rest:
+            return "Unknown"
+        inner = _tmt_core_between_first_last_underscore(rest)
+        if inner:
+            return _tmt_format_plus_bait_label(inner) if ("+" in inner or "_" in inner) else inner.replace("_", " ").strip()
+        return rest.replace("_", " ").strip()
+    if mid:
+        return _tmt_format_plus_bait_label(mid) if "+" in mid else mid.replace("_", " ").strip()
+    return bio.replace("_", " ").strip()
+
+
 def parse_tmt_virtual_channel_metadata(channel_label: str) -> Dict[str, str]:
     """
     Derive Target and Cell Line from the virtual channel label only (not the .xlsx filename).
@@ -320,8 +378,7 @@ def parse_tmt_virtual_channel_metadata(channel_label: str) -> Dict[str, str]:
 
     Rules:
     - Cell line: ``VOA_`` prefix → VOA; plate-style ``1A`` / ``1B`` → JSL_Ref; else Unknown.
-    - Target: ``BRG1`` in bio → BRG1; ``IgG`` (case-insensitive) → IgG Control;
-      plate-style ``1A`` → ``TMT Reference 1A``; ``VOA_*`` remainder otherwise; else bio as words.
+    - Target: see ``_tmt_target_from_bio`` (IgG Control, ``ARID1A + BRG1``, BRG1-only, plate wells, VOA remainder).
     """
     ch = (channel_label or "").strip()
     if not ch:
@@ -330,20 +387,8 @@ def parse_tmt_virtual_channel_metadata(channel_label: str) -> Dict[str, str]:
     iso = ch.split(" | ", 1)[1].strip() if " | " in ch else ""
     bio_u = bio.upper()
 
-    # Target (BRG1 / IgG before generic VOA remainder / plate)
-    if "BRG1" in bio_u:
-        target = "BRG1"
-    elif "IGG" in bio_u:
-        target = "IgG Control"
-    elif _PLATE_CHANNEL_RE.fullmatch(bio):
-        target = f"TMT Reference {bio}"
-    elif bio_u.startswith("VOA_"):
-        rest = bio[4:].strip() if len(bio) >= 4 else ""
-        target = rest.replace("_", " ").strip() if rest else "Unknown"
-    else:
-        target = bio.replace("_", " ").strip() if bio else "Unknown"
+    target = _tmt_target_from_bio(bio)
 
-    # Cell line
     if bio_u.startswith("VOA_"):
         cell_line = "VOA"
     elif _PLATE_CHANNEL_RE.fullmatch(bio):
@@ -515,6 +560,7 @@ def build_tmt_manifest_rows(xlsx_path: Path) -> List[Dict[str, Any]]:
 
     base_meta = extract_metadata(xlsx_path)
     inv = xlsx_path.parent.name or "Unknown"
+    initials_display = inv.replace("_", " ")
     rows_out: List[Dict[str, Any]] = []
     for sn_col in sn_cols:
         ch = sn_sum_col_to_channel_label(sn_col)
@@ -522,7 +568,7 @@ def build_tmt_manifest_rows(xlsx_path: Path) -> List[Dict[str, Any]]:
         cell_line = parsed["cell_line"]
         target = parsed["target"]
         sample_label = parsed.get("sample_label") or "Unknown"
-        # Searchable selectbox label: filename + parsed fields + channel (not filename-only regex for TMT)
+        # Select experiment: Filename | Target | Cell | TMT channel (isobar / column id)
         display = f"{xlsx_path.name} | Target: {target} | Cell: {cell_line} | Channel: {ch}"
         rows_out.append(
             {
@@ -530,7 +576,7 @@ def build_tmt_manifest_rows(xlsx_path: Path) -> List[Dict[str, Any]]:
                 "file_name": display,
                 "investigator": inv,
                 "session_id": base_meta["session_id"],
-                "initials": base_meta["initials"],
+                "initials": initials_display,
                 "target": target,
                 "cell_line": cell_line,
                 "sample_label": sample_label,
