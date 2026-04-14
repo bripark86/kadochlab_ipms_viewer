@@ -179,7 +179,10 @@ def extract_metadata(csv_path: Path) -> Dict[str, str]:
 
 
 def infer_tmt_investigator(path: Path) -> str:
-    """If stem matches numeric session pattern, use parent folder; else default JSL."""
+    """TMT .xlsx: prefer JSL when the filename/path contains JSL; else folder-based session pattern."""
+    blob = f"{path.name}_{path.parent.name}".upper()
+    if "JSL" in blob:
+        return "JSL"
     stem = path.stem
     parts = stem.split("_")
     if len(parts) >= 2 and parts[0].isdigit() and parts[1].isdigit():
@@ -312,42 +315,46 @@ def _normalize_tmt_iso_fragment(p: str) -> str:
 _PLATE_CHANNEL_RE = re.compile(r"^\d+[A-Za-z]$")
 
 
-def parse_tmt_virtual_channel_metadata(channel_label: str) -> Optional[Dict[str, str]]:
+def parse_tmt_virtual_channel_metadata(channel_label: str) -> Dict[str, str]:
     """
-    Map TMT virtual channel display labels (Row-1 short codes) to Cell Line and Target for manifest rows.
+    Derive Target and Cell Line from the virtual channel label only (not the .xlsx filename).
 
-    - VOA_* → Cell Line VOA; strip prefix; remainder like BRG1_1 → Target "BRG1 (Rep 1)".
-    - Plate-style labels like 1A → Cell Line JSL_Ref; Target "Channel 1A" (see Requirement 1 example).
-    Returns None if no specialized rule applies (caller keeps filename-based metadata).
+    Uses the substring before ' | ' (Row-1 short code + TMT column), e.g. ``VOA_BRG1_2 | 128C`` → bio ``VOA_BRG1_2``.
+
+    Rules:
+    - Cell line: ``VOA_`` prefix → VOA; plate-style ``1A`` / ``1B`` → JSL_Ref; else Unknown.
+    - Target: ``BRG1`` in bio → BRG1; ``IgG`` (case-insensitive) → IgG Control;
+      plate-style ``1A`` → ``TMT Reference 1A``; ``VOA_*`` remainder otherwise; else bio as words.
     """
     ch = (channel_label or "").strip()
     if not ch:
-        return None
+        return {"cell_line": "Unknown", "target": "Unknown", "sample_label": "Unknown"}
     bio = ch.split(" | ", 1)[0].strip() if " | " in ch else ch
     iso = ch.split(" | ", 1)[1].strip() if " | " in ch else ""
+    bio_u = bio.upper()
 
-    if bio.upper().startswith("VOA_"):
+    # Target (BRG1 / IgG before generic VOA remainder / plate)
+    if "BRG1" in bio_u:
+        target = "BRG1"
+    elif "IGG" in bio_u:
+        target = "IgG Control"
+    elif _PLATE_CHANNEL_RE.fullmatch(bio):
+        target = f"TMT Reference {bio}"
+    elif bio_u.startswith("VOA_"):
+        rest = bio[4:].strip() if len(bio) >= 4 else ""
+        target = rest.replace("_", " ").strip() if rest else "Unknown"
+    else:
+        target = bio.replace("_", " ").strip() if bio else "Unknown"
+
+    # Cell line
+    if bio_u.startswith("VOA_"):
         cell_line = "VOA"
-        rest = bio[4:] if len(bio) >= 4 else ""
-        rest = rest.strip()
-        if not rest:
-            return {"cell_line": cell_line, "target": "Unknown", "sample_label": iso or "Unknown"}
-        m = re.match(r"^(.+)_(\d+)$", rest)
-        if m:
-            base, rep = m.group(1).strip(), m.group(2).strip()
-            target = f"{base} (Rep {rep})"
-        else:
-            target = rest.replace("_", " ").strip() or "Unknown"
-        return {"cell_line": cell_line, "target": target, "sample_label": iso or "Unknown"}
+    elif _PLATE_CHANNEL_RE.fullmatch(bio):
+        cell_line = "JSL_Ref"
+    else:
+        cell_line = "Unknown"
 
-    if _PLATE_CHANNEL_RE.fullmatch(bio):
-        return {
-            "cell_line": "JSL_Ref",
-            "target": f"Channel {bio}",
-            "sample_label": iso or "Unknown",
-        }
-
-    return None
+    return {"cell_line": cell_line, "target": target, "sample_label": iso if iso else "Unknown"}
 
 
 def manifest_row_matches_bait(target_str: str, bait_canonical: str) -> bool:
@@ -484,16 +491,12 @@ def build_tmt_manifest_rows(xlsx_path: Path) -> List[Dict[str, Any]]:
     rows_out: List[Dict[str, Any]] = []
     for sn_col in sn_cols:
         ch = sn_sum_col_to_channel_label(sn_col)
-        display = f"{xlsx_path.name} | Channel: {ch}"
         parsed = parse_tmt_virtual_channel_metadata(ch)
-        if parsed:
-            cell_line = parsed["cell_line"]
-            target = parsed["target"]
-            sample_label = parsed.get("sample_label") or base_meta.get("sample_label", "Unknown")
-        else:
-            cell_line = base_meta["cell_line"]
-            target = base_meta["target"]
-            sample_label = base_meta.get("sample_label", "Unknown")
+        cell_line = parsed["cell_line"]
+        target = parsed["target"]
+        sample_label = parsed.get("sample_label") or "Unknown"
+        # Searchable selectbox label: filename + parsed fields + channel (not filename-only regex for TMT)
+        display = f"{xlsx_path.name} | Target: {target} | Cell: {cell_line} | Channel: {ch}"
         rows_out.append(
             {
                 "path": str(xlsx_path),
@@ -517,7 +520,11 @@ def summarize_experiment_any(path: Path, tmt_sn_sum_column: Optional[str] = None
     if path.suffix.lower() == ".xlsx":
         if not tmt_sn_sum_column:
             return pd.DataFrame(columns=["Gene Symbol", "Spectral Count", "Unique Peptides", "LDA Probability"])
-        return summarize_tmt_channel(path, tmt_sn_sum_column)
+        try:
+            return summarize_tmt_channel(path, tmt_sn_sum_column)
+        except Exception as exc:
+            print(f"TMT summarize skipped for {path}: {exc}")
+            return pd.DataFrame(columns=["Gene Symbol", "Spectral Count", "Unique Peptides", "LDA Probability"])
     return summarize_experiment(path)
 
 

@@ -288,6 +288,9 @@ if meta_df.empty:
     st.error("No CSV or Excel files found in `Data/`.")
     st.stop()
 
+MODE_CSV = "🔬 Single-Bait Discovery (CSV)"
+MODE_TMT = "📊 Multiplex Comparison (TMT)"
+
 if "quick_open_file" not in st.session_state:
     st.session_state["quick_open_file"] = None
 if "selected_file" not in st.session_state:
@@ -298,27 +301,42 @@ if "qc_path" not in st.session_state:
     st.session_state["qc_path"] = None
 if "stats_valid" not in st.session_state:
     st.session_state["stats_valid"] = True
+if "app_mode" not in st.session_state:
+    st.session_state["app_mode"] = MODE_CSV
 
 tab_options = ["Dataset Browser", "Discovery Hub", "Comparative Analysis", "Data Management"]
 if st.session_state["active_tab"] not in tab_options:
     st.session_state["active_tab"] = "Dataset Browser"
 
 with st.sidebar:
+    st.session_state["app_mode"] = st.selectbox(
+        "Analysis Pipeline",
+        options=[MODE_CSV, MODE_TMT],
+        index=0 if st.session_state["app_mode"] == MODE_CSV else 1,
+    )
     st.session_state["active_tab"] = st.radio(
         "Navigation",
         options=tab_options,
         index=tab_options.index(st.session_state["active_tab"]),
     )
 
+mode_is_tmt = st.session_state["app_mode"] == MODE_TMT
+meta_df_mode = meta_df[
+    meta_df["path"].apply(lambda p: Path(str(p)).suffix.lower() == (".xlsx" if mode_is_tmt else ".csv"))
+].copy()
+
 if st.session_state["active_tab"] == "Dataset Browser":
     section_header("Dataset Browser (Control Center)", BAF_RED)
-    investigators = sorted(meta_df["investigator"].unique().tolist())
+    if meta_df_mode.empty:
+        st.warning("No experiments found for the selected analysis pipeline.")
+        st.stop()
+    investigators = sorted(meta_df_mode["investigator"].unique().tolist())
     default_inv = investigators[0]
     preferred_file = st.session_state.get("selected_file") or st.session_state.get("quick_open_file")
-    if preferred_file in meta_df["file_name"].tolist():
-        default_inv = meta_df.loc[meta_df["file_name"] == preferred_file, "investigator"].iloc[0]
+    if preferred_file in meta_df_mode["file_name"].tolist():
+        default_inv = meta_df_mode.loc[meta_df_mode["file_name"] == preferred_file, "investigator"].iloc[0]
     selected_inv = st.selectbox("Investigator", options=investigators, index=investigators.index(default_inv))
-    inv_df_raw = meta_df[meta_df["investigator"] == selected_inv].copy()
+    inv_df_raw = meta_df_mode[meta_df_mode["investigator"] == selected_inv].copy()
     inv_df = enrich_manifest(inv_df_raw)
     if "experiment_type" not in inv_df.columns:
         inv_df = inv_df.copy()
@@ -354,11 +372,19 @@ if st.session_state["active_tab"] == "Dataset Browser":
     st.session_state["qc_path"] = selected_row["path"]
     tmt_sn = tmt_sn_col_from_row(selected_row)
     is_tmt = tmt_sn is not None
-    try:
-        exp = load_and_process_file(selected_row["path"], tmt_sn)
-    except Exception as exc:
-        st.error(f"TMT / file load failed: {exc}")
+    selected_suffix = Path(str(selected_row["path"])).suffix.lower()
+    if st.session_state["app_mode"] == MODE_CSV and selected_suffix == ".xlsx":
+        st.warning("Please switch to TMT mode to view Excel data.")
         exp = pd.DataFrame(columns=["Gene Symbol", "Spectral Count", "Unique Peptides", "LDA Probability"])
+    elif st.session_state["app_mode"] == MODE_TMT and selected_suffix == ".csv":
+        st.warning("Please switch to CSV mode to view label-free data.")
+        exp = pd.DataFrame(columns=["Gene Symbol", "Spectral Count", "Unique Peptides", "LDA Probability"])
+    else:
+        try:
+            exp = load_and_process_file(selected_row["path"], tmt_sn)
+        except Exception as exc:
+            st.error(f"TMT / file load failed: {exc}")
+            exp = pd.DataFrame(columns=["Gene Symbol", "Spectral Count", "Unique Peptides", "LDA Probability"])
     if is_tmt:
         st.caption("📍 Mode: TMT Multiplexed Data")
     if exp.empty:
@@ -413,7 +439,7 @@ if st.session_state["active_tab"] == "Dataset Browser":
     channel_opts: list = []
     ref_sel: list = []
     tgt_sel: list = []
-    if xlsx_path.suffix.lower() == ".xlsx":
+    if st.session_state["app_mode"] == MODE_TMT and xlsx_path.suffix.lower() == ".xlsx":
         with st.sidebar:
             st.markdown("---")
             st.markdown("**TMT comparison (MA)**")
@@ -459,7 +485,10 @@ if st.session_state["active_tab"] == "Discovery Hub":
     compare_core = st.toggle("Compare with Core BAF", value=False)
 
     if gene_query:
-        hub_meta = enrich_manifest(meta_df)
+        hub_meta = enrich_manifest(meta_df_mode)
+        if hub_meta.empty:
+            st.warning("No experiments available for the selected analysis pipeline.")
+            st.stop()
         bait_for_consensus = dp.resolve_search_as_bait(gene_query)
 
         if bait_for_consensus is not None:
@@ -591,11 +620,14 @@ if st.session_state["active_tab"] == "Discovery Hub":
 
 if st.session_state["active_tab"] == "Comparative Analysis":
     section_header("Comparative Analysis", EMERALD)
-    picks = st.multiselect("Choose 2 to 4 experiments", options=meta_df["file_name"].tolist(), max_selections=4)
+    if meta_df_mode.empty:
+        st.warning("No experiments available for the selected analysis pipeline.")
+        st.stop()
+    picks = st.multiselect("Choose 2 to 4 experiments", options=meta_df_mode["file_name"].tolist(), max_selections=4)
     if len(picks) == 2:
         a_file, b_file = picks[0], picks[1]
-        a_row = enrich_manifest(meta_df[meta_df["file_name"] == a_file]).iloc[0]
-        b_row = enrich_manifest(meta_df[meta_df["file_name"] == b_file]).iloc[0]
+        a_row = enrich_manifest(meta_df_mode[meta_df_mode["file_name"] == a_file]).iloc[0]
+        b_row = enrich_manifest(meta_df_mode[meta_df_mode["file_name"] == b_file]).iloc[0]
         a_sn, b_sn = tmt_sn_col_from_row(a_row), tmt_sn_col_from_row(b_row)
         a_exp = load_and_process_file(a_row["path"], a_sn)
         a_stats_valid = st.session_state.get("stats_valid", True)
@@ -635,7 +667,7 @@ if st.session_state["active_tab"] == "Comparative Analysis":
         st.markdown("#### Category preview")
         st.dataframe(summary, use_container_width=True)
     elif len(picks) >= 3:
-        subset = meta_df[meta_df["file_name"].isin(picks)].copy()
+        subset = meta_df_mode[meta_df_mode["file_name"].isin(picks)].copy()
         merged = None
         for _, row in subset.iterrows():
             e = load_experiment_summary(row["path"], tmt_sn_col_from_row(row))[
