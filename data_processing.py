@@ -1,7 +1,7 @@
 import io
 import re
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
@@ -179,16 +179,12 @@ def extract_metadata(csv_path: Path) -> Dict[str, str]:
 
 
 def infer_tmt_investigator(path: Path) -> str:
-    """TMT .xlsx: prefer JSL when the filename/path contains JSL; else folder-based session pattern."""
-    blob = f"{path.name}_{path.parent.name}".upper()
-    if "JSL" in blob:
-        return "JSL"
-    stem = path.stem
-    parts = stem.split("_")
-    if len(parts) >= 2 and parts[0].isdigit() and parts[1].isdigit():
-        inv = path.parent.name
-        return inv if inv else "JSL"
-    return "JSL"
+    """
+    Deprecated for manifest rows: investigator must be ``path.parent.name`` (physical Data subfolder).
+    Kept for backward compatibility; returns parent folder name when possible.
+    """
+    inv = path.parent.name
+    return inv if inv else "JSL"
 
 
 def select_tmt_sheet(xl: pd.ExcelFile) -> str:
@@ -312,7 +308,8 @@ def _normalize_tmt_iso_fragment(p: str) -> str:
     return p.upper() if p.isascii() else p
 
 
-_PLATE_CHANNEL_RE = re.compile(r"^\d+[A-Za-z]$")
+# Wells like 1A / 12B (not TMT isobar tags such as 127N)
+_PLATE_CHANNEL_RE = re.compile(r"^[0-9]{1,2}[A-Za-z]$")
 
 
 def parse_tmt_virtual_channel_metadata(channel_label: str) -> Dict[str, str]:
@@ -355,6 +352,36 @@ def parse_tmt_virtual_channel_metadata(channel_label: str) -> Dict[str, str]:
         cell_line = "Unknown"
 
     return {"cell_line": cell_line, "target": target, "sample_label": iso if iso else "Unknown"}
+
+
+_TMT_STEM_DATE_PREFIX = re.compile(r"^\d{4}-\d{2}-\d{2}_", re.IGNORECASE)
+
+
+def tmt_fallback_target_cellline_from_filename(xlsx_path: Path) -> Tuple[str, str]:
+    """
+    When Row-1 channel labels do not encode biology (no VOA_/plate style), derive Target from the
+    workbook stem (e.g. ``2025-09-25_KSO_IP9`` → Target ``IP9``). Cell line is ``Unknown/TMT``.
+    """
+    stem = _TMT_STEM_DATE_PREFIX.sub("", xlsx_path.stem, count=1)
+    parts = [p for p in stem.split("_") if str(p).strip()]
+    if not parts:
+        return "Unknown", "Unknown/TMT"
+    return str(parts[-1]).strip(), "Unknown/TMT"
+
+
+def merge_tmt_parsed_with_filename_fallback(parsed: Dict[str, str], xlsx_path: Path) -> Dict[str, str]:
+    """
+    When Row-1 labels do not encode a cell line (no VOA_/plate), use the workbook stem for Target
+    (e.g. ``..._KSO_IP9`` → ``IP9``) and ``Unknown/TMT`` for Cell line. If only Target was unknown, fill it from stem.
+    """
+    out = {**parsed}
+    ft, fc = tmt_fallback_target_cellline_from_filename(xlsx_path)
+    if out.get("cell_line") == "Unknown":
+        out["cell_line"] = fc
+        out["target"] = ft
+    elif out.get("target") == "Unknown":
+        out["target"] = ft
+    return out
 
 
 def manifest_row_matches_bait(target_str: str, bait_canonical: str) -> bool:
@@ -487,11 +514,11 @@ def build_tmt_manifest_rows(xlsx_path: Path) -> List[Dict[str, Any]]:
         return []
 
     base_meta = extract_metadata(xlsx_path)
-    inv = infer_tmt_investigator(xlsx_path)
+    inv = xlsx_path.parent.name or "Unknown"
     rows_out: List[Dict[str, Any]] = []
     for sn_col in sn_cols:
         ch = sn_sum_col_to_channel_label(sn_col)
-        parsed = parse_tmt_virtual_channel_metadata(ch)
+        parsed = merge_tmt_parsed_with_filename_fallback(parse_tmt_virtual_channel_metadata(ch), xlsx_path)
         cell_line = parsed["cell_line"]
         target = parsed["target"]
         sample_label = parsed.get("sample_label") or "Unknown"

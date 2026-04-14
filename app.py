@@ -102,13 +102,16 @@ def enrich_manifest(df: pd.DataFrame) -> pd.DataFrame:
     out_rows = []
     for _, row in df.iterrows():
         rd = row.to_dict()
+        pth = Path(str(rd["path"]))
+        inv_from_folder = pth.parent.name or str(rd.get("investigator", "") or "")
         sn = rd.get("tmt_sn_sum_column")
         if sn is not None and str(sn).strip() != "" and (not isinstance(sn, float) or not pd.isna(sn)):
-            rd = {**rd}
+            rd = {**rd, "investigator": inv_from_folder}
             rd.setdefault("experiment_type", "TMT Multiplex")
             out_rows.append(rd)
             continue
         m = get_path_metadata(str(row["path"]))
+        m["investigator"] = inv_from_folder
         out_rows.append({**rd, **m, "experiment_type": "Label-Free"})
     return pd.DataFrame(out_rows)
 
