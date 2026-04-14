@@ -109,10 +109,13 @@ def enrich_manifest(df: pd.DataFrame) -> pd.DataFrame:
             # Keep TMT manifest investigator display name (e.g., "Kevin So"), already path-derived.
             rd = {**rd, "investigator": str(rd.get("investigator") or inv_from_folder)}
             rd.setdefault("experiment_type", "TMT Multiplex")
+            if not rd.get("biological_condition"):
+                rd["biological_condition"] = dp.tmt_biological_condition_from_channel_label(str(rd.get("tmt_channel", "")))
             out_rows.append(rd)
             continue
         m = get_path_metadata(str(row["path"]))
         m["investigator"] = inv_from_folder
+        m["biological_condition"] = "Single Run"
         out_rows.append({**rd, **m, "experiment_type": "Label-Free"})
     return pd.DataFrame(out_rows)
 
@@ -334,6 +337,12 @@ if st.session_state["active_tab"] == "Dataset Browser":
     if meta_df_mode.empty:
         st.warning("No experiments found for the selected analysis pipeline.")
         st.stop()
+    meta_search = st.text_input(
+        "Filter experiments",
+        value="",
+        key="dataset_browser_meta_search",
+        placeholder="Search Target, Biological Condition, file name, cell line… (e.g. GPF)",
+    ).strip()
     investigators = sorted(meta_df_mode["investigator"].unique().tolist())
     default_inv = investigators[0]
     preferred_file = st.session_state.get("selected_file") or st.session_state.get("quick_open_file")
@@ -345,13 +354,46 @@ if st.session_state["active_tab"] == "Dataset Browser":
     if "experiment_type" not in inv_df.columns:
         inv_df = inv_df.copy()
         inv_df["experiment_type"] = "Label-Free"
-    browse_cols = ["session_id", "initials", "target", "cell_line", "sample_label", "experiment_type", "full_filename"]
+    if "biological_condition" not in inv_df.columns:
+        inv_df = inv_df.copy()
+        inv_df["biological_condition"] = "Single Run"
+    if meta_search:
+        q = meta_search.upper()
+
+        def _contains(series: pd.Series) -> pd.Series:
+            return series.astype(str).str.upper().str.contains(q, na=False, regex=False)
+
+        mask = _contains(inv_df["target"])
+        for col in (
+            "biological_condition",
+            "cell_line",
+            "file_name",
+            "full_filename",
+            "sample_label",
+            "session_id",
+            "initials",
+            "tmt_channel",
+        ):
+            if col in inv_df.columns:
+                mask = mask | _contains(inv_df[col])
+        inv_df = inv_df[mask].copy()
+    browse_cols = [
+        "session_id",
+        "initials",
+        "target",
+        "biological_condition",
+        "cell_line",
+        "sample_label",
+        "experiment_type",
+        "full_filename",
+    ]
     browse_cols = [c for c in browse_cols if c in inv_df.columns]
     table_df = inv_df[browse_cols].rename(
         columns={
             "session_id": "Session ID",
             "initials": "Initials",
             "target": "Target",
+            "biological_condition": "Biological Condition",
             "cell_line": "Cell Line",
             "sample_label": "Sample Label",
             "experiment_type": "Type",
@@ -359,11 +401,25 @@ if st.session_state["active_tab"] == "Dataset Browser":
         }
     )
     if not table_df.empty:
+        col_cfg = {
+            "Biological Condition": st.column_config.TextColumn(
+                "Biological Condition",
+                width="large",
+                help="Row-1 multiplex label (Kevin / Jessica) or Single Run for CSV.",
+            ),
+        }
         try:
-            st.dataframe(table_df.style.map(highlight_target_cell, subset=["Target"]), use_container_width=True)
+            st.dataframe(
+                table_df.style.map(highlight_target_cell, subset=["Target"]),
+                use_container_width=True,
+                column_config=col_cfg,
+            )
         except Exception as e:
-            print(f"Styling failed: {e}")
-            st.dataframe(table_df, use_container_width=True)
+            print(f"Styled dataframe / column_config failed: {e}")
+            try:
+                st.dataframe(table_df, use_container_width=True, column_config=col_cfg)
+            except Exception:
+                st.dataframe(table_df, use_container_width=True)
     else:
         st.info("No experiments available for this investigator.")
     options = inv_df["file_name"].tolist()

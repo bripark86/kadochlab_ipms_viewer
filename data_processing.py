@@ -281,6 +281,15 @@ def tmt_short_label_from_column(col: str) -> str:
     return ""
 
 
+def tmt_biological_condition_from_channel_label(channel_label: str) -> str:
+    """
+    Row-1 biological label for manifest ``Biological_Condition`` / table column.
+    Kevin: e.g. ``GPF_1``; Jessica: e.g. ``VOA_ARID1A+_BRG1_1`` (prefix before isobar / channel id).
+    """
+    bio = tmt_short_label_from_column(channel_label)
+    return bio if bio else "N/A"
+
+
 def read_tmt_excel_wide(path: Path) -> pd.DataFrame:
     xl = pd.ExcelFile(path, engine="openpyxl")
     sheet = select_tmt_sheet(xl)
@@ -602,6 +611,7 @@ def build_tmt_manifest_rows(xlsx_path: Path) -> List[Dict[str, Any]]:
     rows_out: List[Dict[str, Any]] = []
     for sn_col in sn_cols:
         ch = sn_sum_col_to_channel_label(sn_col)
+        biological_condition = tmt_biological_condition_from_channel_label(ch)
         parsed = merge_tmt_parsed_with_filename_fallback(parse_tmt_virtual_channel_metadata(ch), xlsx_path)
         cell_line = parsed["cell_line"]
         target = parsed["target"]
@@ -616,6 +626,7 @@ def build_tmt_manifest_rows(xlsx_path: Path) -> List[Dict[str, Any]]:
                 "session_id": base_meta["session_id"],
                 "initials": initials_display,
                 "target": target,
+                "biological_condition": biological_condition,
                 "cell_line": cell_line,
                 "sample_label": sample_label,
                 "full_filename": xlsx_path.name,
@@ -773,6 +784,7 @@ def hub_manifest_row_matches_global_query(row: Dict[str, Any], query: str) -> bo
     parts = [
         tgt,
         can,
+        str(row.get("biological_condition", "")),
         str(row.get("cell_line", "")),
         str(row.get("tmt_channel", "")),
         str(row.get("file_name", "")),
