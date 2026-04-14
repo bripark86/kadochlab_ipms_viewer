@@ -249,6 +249,14 @@ def assemble_tmt_column_names(full: pd.DataFrame, hrow: int) -> List[str]:
         except ValueError:
             return False
 
+    def _is_description_like(v: str) -> bool:
+        t = (v or "").strip()
+        if not t:
+            return False
+        if len(t) > 50:
+            return True
+        return "summed values" in t.lower()
+
     new_cols: List[str] = []
     for j in range(n):
         base = str(header_vals[j]).strip() if pd.notna(header_vals[j]) else ""
@@ -256,9 +264,12 @@ def assemble_tmt_column_names(full: pd.DataFrame, hrow: int) -> List[str]:
             # Kevin-style: bio labels are often two rows above Protein Id row, while row above is numeric.
             cand_top = _clean_header_cell(row_minus_2[j])
             cand_near = _clean_header_cell(row_minus_1[j])
-            if cand_top and not _is_numericish(cand_top):
+            # Prefer non-numeric, non-description labels. If top row is descriptive, use near row.
+            if cand_top and (not _is_numericish(cand_top)) and (not _is_description_like(cand_top)):
                 code = cand_top
-            elif cand_near and not _is_numericish(cand_near):
+            elif cand_near and (not _is_numericish(cand_near)) and (not _is_description_like(cand_near)):
+                code = cand_near
+            elif cand_top and _is_description_like(cand_top) and cand_near and (not _is_numericish(cand_near)):
                 code = cand_near
             elif cand_top:
                 code = cand_top
@@ -287,7 +298,12 @@ def tmt_biological_condition_from_channel_label(channel_label: str) -> str:
     Kevin: e.g. ``GPF_1``; Jessica: e.g. ``VOA_ARID1A+_BRG1_1`` (prefix before isobar / channel id).
     """
     bio = tmt_short_label_from_column(channel_label)
-    return bio if bio else "N/A"
+    bad_phrase = "summed values: sum of tmt s:n of all peptides for a given protein"
+    cleaned = (bio or "").strip()
+    cleaned = cleaned.replace("Summed values: Sum of TMT S:N of all peptides for a given protein", "").strip()
+    if bad_phrase in cleaned.lower():
+        cleaned = cleaned.lower().replace(bad_phrase, "").strip()
+    return cleaned if cleaned else "Unlabeled"
 
 
 def read_tmt_excel_wide(path: Path) -> pd.DataFrame:
