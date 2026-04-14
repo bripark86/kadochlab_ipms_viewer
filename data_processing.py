@@ -249,32 +249,74 @@ def assemble_tmt_column_names(full: pd.DataFrame, hrow: int) -> List[str]:
         except ValueError:
             return False
 
+    _BLACKLIST = (
+        "tmt summed signal-to-noise",
+        "summed values:",
+        "scaled to 100",
+        "tmt values",
+    )
+
+    def _strip_blacklisted_text(v: str) -> str:
+        out = (v or "").strip()
+        if not out:
+            return out
+        low = out.lower()
+        for bad in _BLACKLIST:
+            i = low.find(bad)
+            if i != -1:
+                out = (out[:i] + out[i + len(bad) :]).strip(" :;-|")
+                low = out.lower()
+        return out.strip()
+
     def _is_description_like(v: str) -> bool:
         t = (v or "").strip()
         if not t:
             return False
-        if len(t) > 50:
+        if len(t) > 60:
             return True
-        return "summed values" in t.lower()
+        low = t.lower()
+        return any(b in low for b in _BLACKLIST)
+
+    def _pick_vertical_label_for_column(col_idx: int) -> str:
+        """
+        Vertical search above Protein Id header:
+        start at row -1, then move up until a non-empty, non-blacklisted, non-numeric label is found.
+        """
+        for r in range(hrow - 1, -1, -1):
+            raw = full.iat[r, col_idx] if r < full.shape[0] and col_idx < full.shape[1] else ""
+            cand = _clean_header_cell(raw)
+            if not cand:
+                continue
+            cand = _strip_blacklisted_text(cand)
+            if not cand:
+                continue
+            if _is_description_like(cand):
+                continue
+            if _is_numericish(cand):
+                continue
+            return cand
+        return ""
 
     new_cols: List[str] = []
     for j in range(n):
         base = str(header_vals[j]).strip() if pd.notna(header_vals[j]) else ""
         if base and is_tmt_sn_sum_column(base):
-            # Kevin-style: bio labels are often two rows above Protein Id row, while row above is numeric.
-            cand_top = _clean_header_cell(row_minus_2[j])
-            cand_near = _clean_header_cell(row_minus_1[j])
-            # Prefer non-numeric, non-description labels. If top row is descriptive, use near row.
-            if cand_top and (not _is_numericish(cand_top)) and (not _is_description_like(cand_top)):
-                code = cand_top
-            elif cand_near and (not _is_numericish(cand_near)) and (not _is_description_like(cand_near)):
-                code = cand_near
-            elif cand_top and _is_description_like(cand_top) and cand_near and (not _is_numericish(cand_near)):
-                code = cand_near
-            elif cand_top:
-                code = cand_top
-            else:
-                code = cand_near
+            # Vertical Search: handles Jessica/Whitney/Kevin mixed header depths robustly.
+            code = _pick_vertical_label_for_column(j)
+            if not code:
+                # Fallback to prior 2-row heuristics when vertical scan finds no good candidate.
+                cand_top = _strip_blacklisted_text(_clean_header_cell(row_minus_2[j]))
+                cand_near = _strip_blacklisted_text(_clean_header_cell(row_minus_1[j]))
+                if cand_top and (not _is_numericish(cand_top)) and (not _is_description_like(cand_top)):
+                    code = cand_top
+                elif cand_near and (not _is_numericish(cand_near)) and (not _is_description_like(cand_near)):
+                    code = cand_near
+                elif cand_top and not _is_numericish(cand_top):
+                    code = cand_top
+                elif cand_near and not _is_numericish(cand_near):
+                    code = cand_near
+                else:
+                    code = ""
             if code:
                 new_cols.append(f"{code} | {base}")
             else:
