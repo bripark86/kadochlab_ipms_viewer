@@ -423,12 +423,21 @@ if st.session_state["active_tab"] == "Dataset Browser":
     else:
         st.info("No experiments available for this investigator.")
     options = inv_df["file_name"].tolist()
+    if not options:
+        st.warning("No matching experiments found. Please adjust your filters.")
+        st.stop()
     default_idx = 0
     if preferred_file in options:
         default_idx = options.index(preferred_file)
     selected_file = st.selectbox("Select experiment", options=options, index=default_idx)
+    if not selected_file:
+        st.stop()
     st.session_state["selected_file"] = selected_file
-    selected_row = inv_df[inv_df["file_name"] == selected_file].iloc[0]
+    selected_hit = inv_df[inv_df["file_name"] == selected_file]
+    if selected_hit.empty:
+        st.warning("No matching experiments found. Please adjust your filters.")
+        st.stop()
+    selected_row = selected_hit.iloc[0]
     st.session_state["qc_path"] = selected_row["path"]
     tmt_sn = tmt_sn_col_from_row(selected_row)
     is_tmt = tmt_sn is not None
