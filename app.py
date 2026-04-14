@@ -106,7 +106,8 @@ def enrich_manifest(df: pd.DataFrame) -> pd.DataFrame:
         inv_from_folder = pth.parent.name or str(rd.get("investigator", "") or "")
         sn = rd.get("tmt_sn_sum_column")
         if sn is not None and str(sn).strip() != "" and (not isinstance(sn, float) or not pd.isna(sn)):
-            rd = {**rd, "investigator": inv_from_folder}
+            # Keep TMT manifest investigator display name (e.g., "Kevin So"), already path-derived.
+            rd = {**rd, "investigator": str(rd.get("investigator") or inv_from_folder)}
             rd.setdefault("experiment_type", "TMT Multiplex")
             out_rows.append(rd)
             continue

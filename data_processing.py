@@ -225,18 +225,45 @@ def is_tmt_sn_sum_column(name: str) -> bool:
 
 
 def assemble_tmt_column_names(full: pd.DataFrame, hrow: int) -> List[str]:
-    """Merge row above header (short codes like 1A, VOA_BRG1) with channel row for sn-sum columns."""
+    """Merge metadata rows above channel header for sn-sum columns (supports 2-row and 3-row styles)."""
     n = int(full.shape[1])
     header_vals = [full.iat[hrow, j] if j < full.shape[1] else "" for j in range(n)]
-    code_vals = [full.iat[hrow - 1, j] if hrow > 0 and j < full.shape[1] else "" for j in range(n)]
+    row_minus_1 = [full.iat[hrow - 1, j] if hrow > 0 and j < full.shape[1] else "" for j in range(n)]
+    row_minus_2 = [full.iat[hrow - 2, j] if hrow > 1 and j < full.shape[1] else "" for j in range(n)]
+
+    def _clean_header_cell(v: Any) -> str:
+        if pd.isna(v):
+            return ""
+        s = str(v).strip()
+        if s.lower() in ("nan", "none"):
+            return ""
+        return s
+
+    def _is_numericish(v: str) -> bool:
+        t = (v or "").strip()
+        if not t:
+            return False
+        try:
+            float(t)
+            return True
+        except ValueError:
+            return False
+
     new_cols: List[str] = []
     for j in range(n):
         base = str(header_vals[j]).strip() if pd.notna(header_vals[j]) else ""
-        code_raw = code_vals[j]
-        code = str(code_raw).strip() if pd.notna(code_raw) else ""
-        if code.lower() in ("nan", "none"):
-            code = ""
         if base and is_tmt_sn_sum_column(base):
+            # Kevin-style: bio labels are often two rows above Protein Id row, while row above is numeric.
+            cand_top = _clean_header_cell(row_minus_2[j])
+            cand_near = _clean_header_cell(row_minus_1[j])
+            if cand_top and not _is_numericish(cand_top):
+                code = cand_top
+            elif cand_near and not _is_numericish(cand_near):
+                code = cand_near
+            elif cand_top:
+                code = cand_top
+            else:
+                code = cand_near
             if code:
                 new_cols.append(f"{code} | {base}")
             else:
@@ -385,9 +412,19 @@ def parse_tmt_virtual_channel_metadata(channel_label: str) -> Dict[str, str]:
         return {"cell_line": "Unknown", "target": "Unknown", "sample_label": "Unknown"}
     bio = ch.split(" | ", 1)[0].strip() if " | " in ch else ch
     iso = ch.split(" | ", 1)[1].strip() if " | " in ch else ""
+    iso_core = _normalize_tmt_iso_fragment(iso) if iso else ""
     bio_u = bio.upper()
 
     target = _tmt_target_from_bio(bio)
+    if (
+        target not in {"Unknown", "IgG Control", "BRG1"}
+        and bio
+        and iso_core
+        and (not bio_u.startswith("VOA_"))
+        and (not _PLATE_CHANNEL_RE.fullmatch(bio))
+    ):
+        # Kevin-style labels (e.g., GPF_1 row + 126 channel row) keep both parts searchable.
+        target = f"{bio} | {iso_core}"
 
     if bio_u.startswith("VOA_"):
         cell_line = "VOA"
@@ -559,8 +596,9 @@ def build_tmt_manifest_rows(xlsx_path: Path) -> List[Dict[str, Any]]:
         return []
 
     base_meta = extract_metadata(xlsx_path)
-    inv = xlsx_path.parent.name or "Unknown"
-    initials_display = inv.replace("_", " ")
+    inv_folder = xlsx_path.parent.name or "Unknown"
+    inv = inv_folder.replace("_", " ")
+    initials_display = inv
     rows_out: List[Dict[str, Any]] = []
     for sn_col in sn_cols:
         ch = sn_sum_col_to_channel_label(sn_col)
