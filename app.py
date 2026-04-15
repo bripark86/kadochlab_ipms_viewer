@@ -469,36 +469,24 @@ if st.session_state["active_tab"] == "Dataset Browser":
         st.stop()
     selected_row = selected_hit.iloc[0]
     st.session_state["qc_path"] = selected_row["path"]
-    dl1, dl2 = st.columns(2)
+    st.markdown("")
     raw_fname = str(selected_row.get("full_filename") or Path(str(selected_row["path"])).name)
     try:
         raw_bytes = get_file_binary(str(selected_row["path"]))
     except Exception as exc:
-        with dl1:
-            st.caption(f"Raw download unavailable: {exc}")
+        st.caption(f"Raw download unavailable: {exc}")
     else:
         raw_mime = (
             "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
             if raw_fname.lower().endswith(".xlsx")
             else "text/csv"
         )
-        with dl1:
-            st.download_button(
-                label=f"📥 Download {raw_fname}",
-                data=raw_bytes,
-                file_name=raw_fname,
-                mime=raw_mime,
-                key=f"dl_raw_{hashlib.md5(str(selected_row['path']).encode()).hexdigest()[:16]}",
-            )
-    inv_bytes = table_df.to_csv(index=False).encode("utf-8")
-    inv_slug = "".join(c if c.isalnum() else "_" for c in selected_inv)[:80] or "inventory"
-    with dl2:
         st.download_button(
-            "📊 Download Inventory (CSV)",
-            data=inv_bytes,
-            file_name=f"dataset_inventory_{inv_slug}.csv",
-            mime="text/csv",
-            key=f"dl_inv_{inv_slug}",
+            label=f"📥 Download {raw_fname}",
+            data=raw_bytes,
+            file_name=raw_fname,
+            mime=raw_mime,
+            key=f"dl_raw_{hashlib.md5(str(selected_row['path']).encode()).hexdigest()[:16]}",
         )
     tmt_sn = tmt_sn_col_from_row(selected_row)
     is_tmt = tmt_sn is not None
