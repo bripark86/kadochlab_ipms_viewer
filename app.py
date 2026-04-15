@@ -407,16 +407,11 @@ if st.session_state["active_tab"] == "Dataset Browser":
             if col in inv_df.columns:
                 mask = mask | _contains(inv_df[col])
         inv_df = inv_df[mask].copy()
-    browse_cols = [
-        "session_id",
-        "initials",
-        "target",
-        "biological_condition",
-        "cell_line",
-        "sample_label",
-        "experiment_type",
-        "full_filename",
-    ]
+    show_tmt_columns = mode_is_tmt
+    browse_cols = ["session_id", "initials", "target"]
+    if show_tmt_columns:
+        browse_cols.extend(["biological_condition", "experiment_type"])
+    browse_cols.extend(["cell_line", "sample_label", "full_filename"])
     browse_cols = [c for c in browse_cols if c in inv_df.columns]
     table_df = inv_df[browse_cols].rename(
         columns={
@@ -647,6 +642,8 @@ if st.session_state["active_tab"] == "Discovery Hub":
                 enrich_view = enrich_cols.sort_values("Exp ID")
                 if mode_is_tmt and "Exp ID" in enrich_view.columns:
                     enrich_view = enrich_view.drop(columns=["Exp ID"])
+                if not mode_is_tmt:
+                    enrich_view = enrich_view.drop(columns=["Type", "Biological Condition"], errors="ignore")
                 st.dataframe(enrich_view, use_container_width=True)
             else:
                 st.info(f"No runs indexed with bait target **{bait_for_consensus}**.")
@@ -721,6 +718,8 @@ if st.session_state["active_tab"] == "Discovery Hub":
         if rows:
             res = pd.DataFrame(rows).sort_values("Spectral Count", ascending=False)
             res_view = res.drop(columns=["Exp ID"], errors="ignore") if mode_is_tmt else res
+            if not mode_is_tmt:
+                res_view = res_view.drop(columns=["Type", "Biological Condition"], errors="ignore")
             if compare_core:
                 try:
                     st.dataframe(
