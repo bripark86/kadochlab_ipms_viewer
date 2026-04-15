@@ -1,6 +1,7 @@
 print("--- APP BOOTING ---")
 
 import hashlib
+import json
 import math
 from pathlib import Path
 from typing import Any, Dict, Optional, Union
@@ -16,6 +17,7 @@ import data_processing as dp
 st.set_page_config(page_title="IPMS Viewer", layout="wide")
 
 DATA_ROOT = Path("Data")
+OVERRIDES_PATH = Path("metadata_overrides.json")
 
 
 def get_file_binary(
@@ -44,6 +46,30 @@ def get_file_binary(
     if not p.is_file():
         raise FileNotFoundError(f"Not found or not a file: {p}")
     return p.read_bytes()
+
+
+def load_metadata_overrides() -> Dict[str, Dict[str, str]]:
+    if not OVERRIDES_PATH.exists():
+        return {}
+    try:
+        raw = json.loads(OVERRIDES_PATH.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    if not isinstance(raw, dict):
+        return {}
+    out: Dict[str, Dict[str, str]] = {}
+    for k, v in raw.items():
+        if not isinstance(v, dict):
+            continue
+        out[str(k)] = {
+            "display_name": str(v.get("display_name", "")).strip(),
+            "details": str(v.get("details", "")).strip(),
+        }
+    return out
+
+
+def save_metadata_overrides(overrides: Dict[str, Dict[str, str]]) -> None:
+    OVERRIDES_PATH.write_text(json.dumps(overrides, indent=2, sort_keys=True), encoding="utf-8")
 
 
 BAF_RED = "#FF4B4B"
@@ -129,6 +155,7 @@ def enrich_manifest(df: pd.DataFrame) -> pd.DataFrame:
     """Attach extract_metadata columns to manifest rows (lazy). TMT rows are already complete."""
     if df.empty:
         return df
+    overrides = load_metadata_overrides()
     out_rows = []
     for _, row in df.iterrows():
         rd = row.to_dict()
@@ -141,13 +168,34 @@ def enrich_manifest(df: pd.DataFrame) -> pd.DataFrame:
             rd.setdefault("experiment_type", "TMT Multiplex")
             if not rd.get("biological_condition"):
                 rd["biological_condition"] = dp.tmt_biological_condition_from_channel_label(str(rd.get("tmt_channel", "")))
+            rd.setdefault("details", "N/A")
+            rd.setdefault("display_name", str(rd.get("file_name", "")))
             out_rows.append(rd)
             continue
         m = get_path_metadata(str(row["path"]))
         m["investigator"] = inv_from_folder
         m["biological_condition"] = "Single Run"
-        out_rows.append({**rd, **m, "experiment_type": "Label-Free"})
-    return pd.DataFrame(out_rows)
+        out_rows.append({**rd, **m, "experiment_type": "Label-Free", "details": "Single Run", "display_name": str(rd.get("file_name", ""))})
+    out_df = pd.DataFrame(out_rows)
+    if out_df.empty:
+        return out_df
+    for i, r in out_df.iterrows():
+        key = str(r.get("full_filename") or Path(str(r.get("path", ""))).name)
+        ov = overrides.get(key, {})
+        disp = str(ov.get("display_name", "")).strip()
+        det = str(ov.get("details", "")).strip()
+        if disp:
+            if str(r.get("tmt_channel", "")).strip():
+                out_df.at[i, "display_name"] = f"{disp} | Channel: {r.get('tmt_channel')}"
+            else:
+                out_df.at[i, "display_name"] = disp
+        if det:
+            out_df.at[i, "details"] = det
+        if not str(out_df.at[i, "details"]).strip():
+            out_df.at[i, "details"] = "N/A"
+        if not str(out_df.at[i, "display_name"]).strip():
+            out_df.at[i, "display_name"] = str(r.get("file_name", ""))
+    return out_df
 
 
 @st.cache_data(show_spinner=False)
@@ -346,6 +394,10 @@ if st.session_state["active_tab"] not in tab_options:
     st.session_state["active_tab"] = "Dataset Browser"
 
 with st.sidebar:
+    admin_mode = st.checkbox("Admin Mode", value=False)
+    nav_options = tab_options + (["Admin Control"] if admin_mode else [])
+    if st.session_state["active_tab"] not in nav_options:
+        st.session_state["active_tab"] = "Dataset Browser"
     st.session_state["app_mode"] = st.selectbox(
         "Analysis Pipeline",
         options=[MODE_CSV, MODE_TMT],
@@ -353,8 +405,8 @@ with st.sidebar:
     )
     st.session_state["active_tab"] = st.radio(
         "Navigation",
-        options=tab_options,
-        index=tab_options.index(st.session_state["active_tab"]),
+        options=nav_options,
+        index=nav_options.index(st.session_state["active_tab"]),
     )
 
 mode_is_tmt = st.session_state["app_mode"] == MODE_TMT
@@ -396,6 +448,8 @@ if st.session_state["active_tab"] == "Dataset Browser":
         mask = _contains(inv_df["target"])
         for col in (
             "biological_condition",
+            "details",
+            "display_name",
             "cell_line",
             "file_name",
             "full_filename",
@@ -408,7 +462,7 @@ if st.session_state["active_tab"] == "Dataset Browser":
                 mask = mask | _contains(inv_df[col])
         inv_df = inv_df[mask].copy()
     show_tmt_columns = mode_is_tmt
-    browse_cols = ["session_id", "initials", "target"]
+    browse_cols = ["session_id", "initials", "target", "details"]
     if show_tmt_columns:
         browse_cols.extend(["biological_condition", "experiment_type"])
     browse_cols.extend(["cell_line", "sample_label", "full_filename"])
@@ -418,6 +472,7 @@ if st.session_state["active_tab"] == "Dataset Browser":
             "session_id": "Session ID",
             "initials": "Initials",
             "target": "Target",
+            "details": "Details",
             "biological_condition": "Biological Condition",
             "cell_line": "Cell Line",
             "sample_label": "Sample Label",
@@ -431,6 +486,11 @@ if st.session_state["active_tab"] == "Dataset Browser":
                 "Biological Condition",
                 width="large",
                 help="Row-1 multiplex label (Kevin / Jessica) or Single Run for CSV.",
+            ),
+            "Details": st.column_config.TextColumn(
+                "Details",
+                width="large",
+                help="Specific experimental details",
             ),
         }
         try:
@@ -454,15 +514,18 @@ if st.session_state["active_tab"] == "Dataset Browser":
     default_idx = 0
     if preferred_file in options:
         default_idx = options.index(preferred_file)
-    selected_file = st.selectbox("Select experiment", options=options, index=default_idx)
-    if not selected_file:
+    idx_options = inv_df.index.tolist()
+    default_row_idx = idx_options[default_idx]
+    selected_idx = st.selectbox(
+        "Select experiment",
+        options=idx_options,
+        index=idx_options.index(default_row_idx),
+        format_func=lambda i: str(inv_df.loc[i, "display_name"]) if "display_name" in inv_df.columns else str(inv_df.loc[i, "file_name"]),
+    )
+    if selected_idx is None:
         st.stop()
-    st.session_state["selected_file"] = selected_file
-    selected_hit = inv_df[inv_df["file_name"] == selected_file]
-    if selected_hit.empty:
-        st.warning("No matching experiments found. Please adjust your filters.")
-        st.stop()
-    selected_row = selected_hit.iloc[0]
+    selected_row = inv_df.loc[selected_idx]
+    st.session_state["selected_file"] = str(selected_row["file_name"])
     st.session_state["qc_path"] = selected_row["path"]
     st.markdown("")
     raw_fname = str(selected_row.get("full_filename") or Path(str(selected_row["path"])).name)
@@ -628,14 +691,15 @@ if st.session_state["active_tab"] == "Discovery Hub":
                 st.caption(f"Indexed experiments where **{bait_for_consensus}** is the IP bait.")
             if not bait_runs.empty:
                 enrich_cols = bait_runs[
-                    ["investigator", "session_id", "cell_line", "sample_label", "file_name", "full_filename"]
+                    ["investigator", "session_id", "cell_line", "sample_label", "details", "display_name", "full_filename"]
                 ].rename(
                     columns={
                         "investigator": "Investigator",
                         "session_id": "Exp ID",
                         "cell_line": "Cell Line",
                         "sample_label": "Sample Label",
-                        "file_name": "File Name",
+                        "details": "Details",
+                        "display_name": "Display Name",
                         "full_filename": "Full Filename",
                     }
                 )
@@ -644,7 +708,13 @@ if st.session_state["active_tab"] == "Discovery Hub":
                     enrich_view = enrich_view.drop(columns=["Exp ID"])
                 if not mode_is_tmt:
                     enrich_view = enrich_view.drop(columns=["Type", "Biological Condition"], errors="ignore")
-                st.dataframe(enrich_view, use_container_width=True)
+                st.dataframe(
+                    enrich_view,
+                    use_container_width=True,
+                    column_config={
+                        "Details": st.column_config.TextColumn("Details", width="large", help="Specific experimental details")
+                    },
+                )
             else:
                 st.info(f"No runs indexed with bait target **{bait_for_consensus}**.")
 
@@ -693,6 +763,7 @@ if st.session_state["active_tab"] == "Discovery Hub":
                             dp.is_core_baf_canonical(dp.identify_baf_target(str(row["target"])))
                             or (str(row["target"]).upper() == "CEBPE")
                         ),
+                        "Details": str(row.get("details", "N/A")),
                         "File Name": row["file_name"],
                     }
                 )
@@ -709,6 +780,7 @@ if st.session_state["active_tab"] == "Discovery Hub":
                             dp.is_core_baf_canonical(dp.identify_baf_target(str(row["target"])))
                             or (str(row["target"]).upper() == "CEBPE")
                         ),
+                        "Details": str(row.get("details", "N/A")),
                         "File Name": row["file_name"],
                     }
                 )
@@ -732,10 +804,16 @@ if st.session_state["active_tab"] == "Discovery Hub":
                 except Exception:
                     st.dataframe(res_view, use_container_width=True)
             else:
-                cols = ["Investigator", "Target", "Cell Line", "Spectral Count", "Unique Peptides"]
+                cols = ["Investigator", "Target", "Cell Line", "Spectral Count", "Unique Peptides", "Details"]
                 if not mode_is_tmt:
                     cols.insert(3, "Exp ID")
-                st.dataframe(res_view[cols], use_container_width=True)
+                st.dataframe(
+                    res_view[cols],
+                    use_container_width=True,
+                    column_config={
+                        "Details": st.column_config.TextColumn("Details", width="large", help="Specific experimental details")
+                    },
+                )
 
             qf = st.selectbox("Quick Open experiment", options=res["File Name"].tolist())
             if st.button("Open in Dataset Browser"):
@@ -866,6 +944,44 @@ if st.session_state["active_tab"] == "Data Management":
             get_path_metadata.clear()
             load_experiment_summary.clear()
             st.warning(f"Deleted: {delete_file}")
+
+if st.session_state["active_tab"] == "Admin Control":
+    section_header("Admin Control", OCEAN_BLUE)
+    st.caption("Manual metadata overrides for display name and experiment details.")
+    all_files = sorted([p for p in DATA_ROOT.rglob("*") if p.is_file() and p.suffix.lower() in (".csv", ".xlsx")])
+    if not all_files:
+        st.info("No files found in Data/.")
+    else:
+        labels = [str(p.relative_to(DATA_ROOT)) for p in all_files]
+        pick_rel = st.selectbox("Pick file", options=labels, key="admin_pick_file")
+        pick_path = DATA_ROOT / pick_rel
+        key = pick_path.name
+        overrides = load_metadata_overrides()
+        current = overrides.get(key, {})
+        disp_default = current.get("display_name", "")
+        details_default = current.get("details", "")
+        new_display = st.text_input("Display Name Override", value=disp_default, key="admin_display_name")
+        new_details = st.text_area(
+            "Experiment Details",
+            value=details_default,
+            key="admin_details",
+            placeholder="e.g., 50nM Purified cBAF + EN119",
+            height=120,
+        )
+        if st.button("💾 Save Changes", key="admin_save_overrides"):
+            payload = {
+                "display_name": new_display.strip(),
+                "details": new_details.strip(),
+            }
+            if payload["display_name"] or payload["details"]:
+                overrides[key] = payload
+            elif key in overrides:
+                overrides.pop(key, None)
+            save_metadata_overrides(overrides)
+            index_library.clear()
+            get_path_metadata.clear()
+            load_experiment_summary.clear()
+            st.success(f"Saved overrides for {key}")
 
 with st.sidebar:
     with st.expander("QC Summary", expanded=True):
