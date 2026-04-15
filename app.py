@@ -550,7 +550,20 @@ if st.session_state["active_tab"] == "Dataset Browser":
             st.caption("No rows to display.")
         else:
             raw_df = exp.sort_values("Spectral Count", ascending=False).reset_index(drop=True)
-            st.dataframe(raw_df, use_container_width=True)
+            if is_tmt:
+                # UI-only projection for TMT protein list (do not mutate raw_df / exp)
+                tmt_view = pd.DataFrame({"Gene Symbol": raw_df["Gene Symbol"]})
+                tmt_view["Description"] = raw_df["Description"] if "Description" in raw_df.columns else ""
+                tmt_view["Biological Condition"] = str(selected_row.get("biological_condition") or "Unlabeled")
+                tmt_view["Log2 Fold Change"] = (
+                    pd.to_numeric(raw_df["Log2 Fold Change"], errors="coerce")
+                    if "Log2 Fold Change" in raw_df.columns
+                    else np.nan
+                )
+                tmt_view["Average Intensity"] = pd.to_numeric(raw_df["Spectral Count"], errors="coerce")
+                st.dataframe(tmt_view, use_container_width=True)
+            else:
+                st.dataframe(raw_df, use_container_width=True)
 
     xlsx_path = Path(selected_row["path"])
     wide_ma: Optional[pd.DataFrame] = None
@@ -631,7 +644,10 @@ if st.session_state["active_tab"] == "Discovery Hub":
                         "full_filename": "Full Filename",
                     }
                 )
-                st.dataframe(enrich_cols.sort_values("Exp ID"), use_container_width=True)
+                enrich_view = enrich_cols.sort_values("Exp ID")
+                if mode_is_tmt and "Exp ID" in enrich_view.columns:
+                    enrich_view = enrich_view.drop(columns=["Exp ID"])
+                st.dataframe(enrich_view, use_container_width=True)
             else:
                 st.info(f"No runs indexed with bait target **{bait_for_consensus}**.")
 
@@ -704,16 +720,23 @@ if st.session_state["active_tab"] == "Discovery Hub":
 
         if rows:
             res = pd.DataFrame(rows).sort_values("Spectral Count", ascending=False)
+            res_view = res.drop(columns=["Exp ID"], errors="ignore") if mode_is_tmt else res
             if compare_core:
                 try:
                     st.dataframe(
-                        res.style.map(lambda v: f"background-color: {SOFT_BLUE}; color: {TEXT_DARK};" if v else "", subset=["Core BAF IP"]),
+                        res_view.style.map(
+                            lambda v: f"background-color: {SOFT_BLUE}; color: {TEXT_DARK};" if v else "",
+                            subset=["Core BAF IP"],
+                        ),
                         use_container_width=True,
                     )
                 except Exception:
-                    st.dataframe(res, use_container_width=True)
+                    st.dataframe(res_view, use_container_width=True)
             else:
-                st.dataframe(res[["Investigator", "Target", "Cell Line", "Exp ID", "Spectral Count", "Unique Peptides"]], use_container_width=True)
+                cols = ["Investigator", "Target", "Cell Line", "Spectral Count", "Unique Peptides"]
+                if not mode_is_tmt:
+                    cols.insert(3, "Exp ID")
+                st.dataframe(res_view[cols], use_container_width=True)
 
             qf = st.selectbox("Quick Open experiment", options=res["File Name"].tolist())
             if st.button("Open in Dataset Browser"):
