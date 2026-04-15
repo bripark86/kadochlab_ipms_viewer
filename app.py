@@ -684,34 +684,14 @@ if st.session_state["active_tab"] == "Discovery Hub":
             meta_hit = dp.hub_manifest_row_matches_global_query(row, gene_query)
             if not hit.empty:
                 best = hit.sort_values("Spectral Count", ascending=False).iloc[0]
-                spec_val = pd.to_numeric(best.get("Spectral Count", np.nan), errors="coerce")
-                spec_float = float(spec_val) if pd.notna(spec_val) else 0.0
                 rows.append(
                     {
                         "Investigator": row["investigator"],
                         "Target": row["target"],
                         "Cell Line": row["cell_line"],
                         "Exp ID": row["session_id"],
-                        "Gene Symbol": str(best.get("Gene Symbol", gene_query)),
-                        "Spectral Count": spec_float,
-                        "Unique Peptides": (
-                            int(best["Unique Peptides"])
-                            if "Unique Peptides" in best.index and not pd.isna(best["Unique Peptides"])
-                            else "N/A"
-                        ),
-                        "LDA Probability": (
-                            float(best["LDA Probability"])
-                            if "LDA Probability" in best.index and not pd.isna(best["LDA Probability"])
-                            else "N/A"
-                        ),
-                        "Description": (
-                            str(best["Description"])
-                            if "Description" in best.index and str(best["Description"]).strip() != ""
-                            else "N/A"
-                        ),
-                        "Biological Condition": str(row.get("biological_condition", "N/A")),
-                        "Channel": str(row.get("sample_label", "N/A")),
-                        "Total Spectra": spec_float if pd.notna(spec_val) else "N/A",
+                        "Spectral Count": float(best["Spectral Count"]),
+                        "Unique Peptides": int(best["Unique Peptides"]),
                         "Core BAF IP": (
                             dp.is_core_baf_canonical(dp.identify_baf_target(str(row["target"])))
                             or (str(row["target"]).upper() == "CEBPE")
@@ -726,14 +706,8 @@ if st.session_state["active_tab"] == "Discovery Hub":
                         "Target": row["target"],
                         "Cell Line": row["cell_line"],
                         "Exp ID": row["session_id"],
-                        "Gene Symbol": gene_query,
                         "Spectral Count": 0.0,
-                        "Unique Peptides": "N/A",
-                        "LDA Probability": "N/A",
-                        "Description": "N/A",
-                        "Biological Condition": str(row.get("biological_condition", "N/A")),
-                        "Channel": str(row.get("sample_label", "N/A")),
-                        "Total Spectra": 0.0,
+                        "Unique Peptides": 0,
                         "Core BAF IP": (
                             dp.is_core_baf_canonical(dp.identify_baf_target(str(row["target"])))
                             or (str(row["target"]).upper() == "CEBPE")
@@ -746,128 +720,42 @@ if st.session_state["active_tab"] == "Discovery Hub":
 
         if rows:
             res = pd.DataFrame(rows).sort_values("Spectral Count", ascending=False)
-            baf_only = st.toggle("Subunit filter (BAF only)", value=False, key="hub_baf_only")
-            if baf_only:
-                res = res[res["Gene Symbol"].apply(is_baf_gene)].copy()
-
-            if mode_is_tmt:
-                tmt_cols = [
-                    "Gene Symbol",
-                    "Biological Condition",
-                    "Channel",
-                    "Unique Peptides",
-                    "Total Spectra",
-                    "Description",
-                ]
-                st.dataframe(res[tmt_cols], use_container_width=True)
-
-                st.header("📊 Differential Expression Analysis")
-                cmp_base = res[tmt_cols].copy()
-                cmp_base["Total Spectra"] = pd.to_numeric(cmp_base["Total Spectra"], errors="coerce").fillna(0.0)
-                cmp_base = cmp_base.groupby(["Gene Symbol", "Channel"], as_index=False)["Total Spectra"].mean()
-                channels = sorted([c for c in cmp_base["Channel"].dropna().astype(str).unique().tolist() if c and c != "N/A"])
-                if len(channels) < 2:
-                    st.info("Need at least 2 channels (reference + target) for differential analysis.")
-                else:
-                    ref_channel = st.selectbox("Reference (Control) Channel", options=channels, key="hub_ref_channel")
-                    ref_df = cmp_base[cmp_base["Channel"] == ref_channel][["Gene Symbol", "Total Spectra"]].rename(
-                        columns={"Total Spectra": "Reference"}
-                    )
-                    tgt_df = cmp_base[cmp_base["Channel"] != ref_channel].groupby("Gene Symbol", as_index=False)["Total Spectra"].mean().rename(
-                        columns={"Total Spectra": "Target"}
-                    )
-                    cmp_df = tgt_df.merge(ref_df, on="Gene Symbol", how="outer").fillna(0.0)
-                    cmp_df["Log2 Fold Change"] = np.log2((cmp_df["Target"] + 1.0) / (cmp_df["Reference"] + 1.0))
-                    cmp_df["Average Intensity"] = np.log10(((cmp_df["Target"] + cmp_df["Reference"]) / 2.0).clip(lower=1e-12))
-                    desc_map = (
-                        res[["Gene Symbol", "Description", "Biological Condition"]]
-                        .drop_duplicates(subset=["Gene Symbol"])
-                        .set_index("Gene Symbol")
-                    )
-                    cmp_df["Description"] = cmp_df["Gene Symbol"].map(desc_map["Description"]).fillna("N/A")
-                    cmp_df["Biological Condition"] = cmp_df["Gene Symbol"].map(desc_map["Biological Condition"]).fillna("N/A")
+            res_view = res.drop(columns=["Exp ID"], errors="ignore") if mode_is_tmt else res
+            if compare_core:
+                try:
                     st.dataframe(
-                        cmp_df[
-                            [
-                                "Gene Symbol",
-                                "Description",
-                                "Biological Condition",
-                                "Log2 Fold Change",
-                                "Average Intensity",
-                            ]
-                        ].sort_values("Log2 Fold Change", ascending=False),
+                        res_view.style.map(
+                            lambda v: f"background-color: {SOFT_BLUE}; color: {TEXT_DARK};" if v else "",
+                            subset=["Core BAF IP"],
+                        ),
                         use_container_width=True,
                     )
-                    ma_fig = px.scatter(
-                        cmp_df,
-                        x="Average Intensity",
-                        y="Log2 Fold Change",
-                        hover_name="Gene Symbol",
-                        hover_data={"Description": True, "Biological Condition": True},
-                        title="MA Plot",
-                        color=cmp_df["Gene Symbol"].apply(lambda g: "BAF subunit" if is_baf_gene(g) else "Other"),
-                        color_discrete_map={"BAF subunit": BAF_RED, "Other": OCEAN_BLUE},
-                    )
-                    ma_fig.update_layout(plot_bgcolor=BG_WHITE, paper_bgcolor=BG_WHITE)
-                    st.plotly_chart(ma_fig, use_container_width=True)
+                except Exception:
+                    st.dataframe(res_view, use_container_width=True)
             else:
-                if compare_core:
-                    try:
-                        st.dataframe(
-                            res.style.map(
-                                lambda v: f"background-color: {SOFT_BLUE}; color: {TEXT_DARK};" if v else "",
-                                subset=["Core BAF IP"],
-                            ),
-                            use_container_width=True,
-                        )
-                    except Exception:
-                        st.dataframe(res, use_container_width=True)
-                else:
-                    st.dataframe(
-                        res[
-                            [
-                                "Investigator",
-                                "Target",
-                                "Cell Line",
-                                "Exp ID",
-                                "Spectral Count",
-                                "Unique Peptides",
-                                "LDA Probability",
-                            ]
-                        ],
-                        use_container_width=True,
-                    )
+                cols = ["Investigator", "Target", "Cell Line", "Spectral Count", "Unique Peptides"]
+                if not mode_is_tmt:
+                    cols.insert(3, "Exp ID")
+                st.dataframe(res_view[cols], use_container_width=True)
 
-            if res.empty:
-                st.info("No hits after applying filters.")
-            else:
-                qf = st.selectbox("Quick Open experiment", options=res["File Name"].tolist())
-                if st.button("Open in Dataset Browser"):
-                    st.session_state["selected_file"] = qf
-                    st.session_state["quick_open_file"] = qf
-                    st.session_state["active_tab"] = "Dataset Browser"
-                    st.rerun()
+            qf = st.selectbox("Quick Open experiment", options=res["File Name"].tolist())
+            if st.button("Open in Dataset Browser"):
+                st.session_state["selected_file"] = qf
+                st.session_state["quick_open_file"] = qf
+                st.session_state["active_tab"] = "Dataset Browser"
+                st.rerun()
 
-                inv_dist = (
-                    res.groupby("Investigator", as_index=False)["Spectral Count"]
-                    .count()
-                    .rename(columns={"Spectral Count": "Hit Count"})
-                    .sort_values("Hit Count", ascending=False)
-                )
-                cell_enrich = (
-                    res.groupby("Cell Line", as_index=False)["Spectral Count"]
-                    .sum()
-                    .sort_values("Spectral Count", ascending=False)
-                )
-                g1, g2 = st.columns(2)
-                with g1:
-                    fig1 = px.bar(inv_dist, x="Investigator", y="Hit Count", title="Enrichment by Investigator", color_discrete_sequence=[OCEAN_BLUE])
-                    fig1.update_layout(plot_bgcolor=BG_WHITE, paper_bgcolor=BG_WHITE)
-                    st.plotly_chart(fig1, use_container_width=True)
-                with g2:
-                    fig2 = px.bar(cell_enrich, x="Cell Line", y="Spectral Count", title="Enrichment by Cell Line", color_discrete_sequence=[EMERALD])
-                    fig2.update_layout(plot_bgcolor=BG_WHITE, paper_bgcolor=BG_WHITE)
-                    st.plotly_chart(fig2, use_container_width=True)
+            inv_dist = res.groupby("Investigator", as_index=False)["Spectral Count"].count().rename(columns={"Spectral Count": "Hit Count"}).sort_values("Hit Count", ascending=False)
+            cell_enrich = res.groupby("Cell Line", as_index=False)["Spectral Count"].sum().sort_values("Spectral Count", ascending=False)
+            g1, g2 = st.columns(2)
+            with g1:
+                fig1 = px.bar(inv_dist, x="Investigator", y="Hit Count", title="Enrichment by Investigator", color_discrete_sequence=[OCEAN_BLUE])
+                fig1.update_layout(plot_bgcolor=BG_WHITE, paper_bgcolor=BG_WHITE)
+                st.plotly_chart(fig1, use_container_width=True)
+            with g2:
+                fig2 = px.bar(cell_enrich, x="Cell Line", y="Spectral Count", title="Enrichment by Cell Line", color_discrete_sequence=[EMERALD])
+                fig2.update_layout(plot_bgcolor=BG_WHITE, paper_bgcolor=BG_WHITE)
+                st.plotly_chart(fig2, use_container_width=True)
         else:
             st.info("No hits found.")
 
