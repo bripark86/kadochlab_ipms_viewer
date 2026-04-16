@@ -823,15 +823,56 @@ if st.session_state["active_tab"] == "Discovery Hub":
                 st.rerun()
 
             inv_dist = res.groupby("Investigator", as_index=False)["Spectral Count"].count().rename(columns={"Spectral Count": "Hit Count"}).sort_values("Hit Count", ascending=False)
-            cell_enrich = res.groupby("Cell Line", as_index=False)["Spectral Count"].sum().sort_values("Spectral Count", ascending=False)
+            _cell_plot_src = res.copy()
+            _cell_plot_src["_upep_cell"] = dp.unique_peptides_numeric_series(_cell_plot_src)
+            cell_enrich = (
+                _cell_plot_src.groupby("Cell Line", as_index=False)
+                .agg(
+                    Unique_Peptides_total=("_upep_cell", "sum"),
+                    Investigator=(
+                        "Investigator",
+                        lambda s: ", ".join(
+                            sorted(
+                                {
+                                    str(x).strip()
+                                    for x in s.dropna().unique()
+                                    if str(x).strip() and str(x).strip().lower() not in ("nan", "none")
+                                }
+                            )
+                        )
+                        or "N/A",
+                    ),
+                )
+                .rename(columns={"Unique_Peptides_total": "Unique Peptides"})
+                .sort_values("Unique Peptides", ascending=False)
+            )
+            cell_enrich["Unique Peptides"] = pd.to_numeric(cell_enrich["Unique Peptides"], errors="coerce").fillna(0.0).round().astype(int)
             g1, g2 = st.columns(2)
             with g1:
                 fig1 = px.bar(inv_dist, x="Investigator", y="Hit Count", title="Enrichment by Investigator", color_discrete_sequence=[OCEAN_BLUE])
                 fig1.update_layout(plot_bgcolor=BG_WHITE, paper_bgcolor=BG_WHITE)
                 st.plotly_chart(fig1, use_container_width=True)
             with g2:
-                fig2 = px.bar(cell_enrich, x="Cell Line", y="Spectral Count", title="Enrichment by Cell Line", color_discrete_sequence=[EMERALD])
-                fig2.update_layout(plot_bgcolor=BG_WHITE, paper_bgcolor=BG_WHITE)
+                fig2 = px.bar(
+                    cell_enrich,
+                    x="Cell Line",
+                    y="Unique Peptides",
+                    title="Enrichment by Cell Line",
+                    color_discrete_sequence=[EMERALD],
+                )
+                fig2.update_layout(
+                    plot_bgcolor=BG_WHITE,
+                    paper_bgcolor=BG_WHITE,
+                    yaxis_title="Unique Peptides",
+                )
+                fig2.update_traces(
+                    hovertemplate=(
+                        "<b>Cell Line:</b> %{x}<br>"
+                        "<b>Unique Peptides:</b> %{y}<br>"
+                        "<b>Investigator:</b> %{customdata[0]}<extra></extra>"
+                    ),
+                    customdata=cell_enrich[["Investigator"]].to_numpy(),
+                )
                 st.plotly_chart(fig2, use_container_width=True)
         else:
             st.info("No hits found.")

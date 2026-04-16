@@ -763,6 +763,17 @@ def resolve_first_column(df: pd.DataFrame, candidates: List[str]) -> Optional[st
     return None
 
 
+def unique_peptides_numeric_series(df: pd.DataFrame) -> pd.Series:
+    """
+    First matching unique-peptide count column (flexible names); coerced to float, NaN → 0.
+    Same candidate order as summarize_experiment / Global Results–style tables.
+    """
+    col = resolve_first_column(df, ["Unique Peptides", "Peptide Count", "Unique_Peptides", "Peptides"])
+    if col and col in df.columns:
+        return pd.to_numeric(df[col], errors="coerce").fillna(0.0)
+    return pd.Series(0.0, index=df.index, dtype=float)
+
+
 def filter_rows_for_gene(df: pd.DataFrame, gene_query: str) -> pd.DataFrame:
     """
     Rows matching the searched gene symbol, including BAF alias equivalence (e.g. BRG1 vs SMARCA4).
