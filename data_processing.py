@@ -370,7 +370,18 @@ def read_tmt_excel_wide(path: Path) -> pd.DataFrame:
 
     gene_col = resolve_column(df, ["Gene Symbol", "Gene", "Symbol"])
     desc_col = resolve_column(df, ["Description", "Protein Description"])
-    pep_col = resolve_column(df, ["No. of peptides", "No Of Peptides", "Number of peptides", "Peptides"])
+    pep_col = resolve_first_column(
+        df,
+        [
+            "Unique Peptides",
+            "Peptide Count",
+            "Unique_Peptides",
+            "No. of peptides",
+            "No Of Peptides",
+            "Number of peptides",
+            "Peptides",
+        ],
+    )
     id_keep = [c for c in [pid_col, gene_col, desc_col, pep_col] if c and c in df.columns]
     sig_cols = [c for c in df.columns if is_tmt_sn_sum_column(c)]
     if not sig_cols:
@@ -623,7 +634,18 @@ def summarize_tmt_channel(path: Path, sn_sum_col: str, wide_df: Optional[pd.Data
     if not gene_col:
         raise ValueError("TMT sheet: Gene Symbol column not found")
 
-    pep_col = resolve_column(df, ["No. of peptides", "No Of Peptides", "Number of peptides", "Peptides"])
+    pep_col = resolve_first_column(
+        df,
+        [
+            "Unique Peptides",
+            "Peptide Count",
+            "Unique_Peptides",
+            "No. of peptides",
+            "No Of Peptides",
+            "Number of peptides",
+            "Peptides",
+        ],
+    )
     desc_col = resolve_column(df, ["Description", "Protein Description"])
 
     use = df[[gene_col, sn_sum_col] + [c for c in [pep_col, desc_col] if c]].copy()
@@ -634,10 +656,10 @@ def summarize_tmt_channel(path: Path, sn_sum_col: str, wide_df: Optional[pd.Data
     use["_spec"] = spec
 
     if pep_col:
-        npep = pd.to_numeric(use[pep_col], errors="coerce").fillna(0)
+        npep = pd.to_numeric(use[pep_col], errors="coerce").fillna(0.0)
         use["_npep"] = npep
         use["_lda"] = np.where(use["_npep"] > 1, 0.99, 0.50)
-        use["_upep"] = npep.astype(int)
+        use["_upep"] = npep.round().astype(np.int64)
     else:
         use["_lda"] = 0.50
         use["_upep"] = 0
@@ -649,6 +671,8 @@ def summarize_tmt_channel(path: Path, sn_sum_col: str, wide_df: Optional[pd.Data
         .rename(columns={gene_col: "Gene Symbol"})
     )
     agg = agg.rename(columns={"Spectral_Count": "Spectral Count", "LDA_Probability": "LDA Probability", "Unique_Peptides": "Unique Peptides"})
+    agg["Spectral Count"] = pd.to_numeric(agg["Spectral Count"], errors="coerce").fillna(0.0).round().astype(np.int64)
+    agg["Unique Peptides"] = pd.to_numeric(agg["Unique Peptides"], errors="coerce").fillna(0.0).round().astype(np.int64)
     ch_label = sn_sum_col_to_channel_label(sn_sum_col)
     agg["TMT_Channel"] = ch_label
     return agg.sort_values("Spectral Count", ascending=False)
@@ -730,6 +754,35 @@ def resolve_column(df: pd.DataFrame, candidates: List[str]) -> Optional[str]:
     return None
 
 
+def resolve_first_column(df: pd.DataFrame, candidates: List[str]) -> Optional[str]:
+    """Return the first matching column name from candidates (in order), or None."""
+    for cand in candidates:
+        col = resolve_column(df, [cand])
+        if col:
+            return col
+    return None
+
+
+def filter_rows_for_gene(df: pd.DataFrame, gene_query: str) -> pd.DataFrame:
+    """
+    Rows matching the searched gene symbol, including BAF alias equivalence (e.g. BRG1 vs SMARCA4).
+    Ensures Global Results pull the bait/gene row, not an arbitrary first row.
+    """
+    if df is None:
+        return pd.DataFrame()
+    if df.empty or "Gene Symbol" not in df.columns:
+        return df.iloc[0:0].copy()
+    q = (gene_query or "").strip().upper()
+    if not q:
+        return df.iloc[0:0].copy()
+    genes = df["Gene Symbol"].astype(str).str.strip().str.upper()
+    mask = genes == q
+    q_can = identify_baf_target(q)
+    if q_can:
+        mask = mask | genes.map(lambda g: identify_baf_target(str(g)) == q_can)
+    return df.loc[mask].copy()
+
+
 FLATLINE_SIGNIFICANCE_MSG = "Flatline Significance Detected."
 LDA_STD_OK_THRESHOLD = 0.1
 
@@ -785,27 +838,33 @@ def compute_qc_metrics(csv_path: Path) -> Dict[str, Any]:
 def summarize_experiment(csv_path: Path) -> pd.DataFrame:
     df = read_csv_flexible(csv_path)
     gene_col = resolve_column(df, ["Gene Symbol", "Gene", "Symbol"])
-    peptide_col = resolve_column(df, ["Peptide", "Peptide Sequence"])
+    peptide_seq_col = resolve_column(df, ["Peptide", "Peptide Sequence"])
     lda_col = resolve_column(df, ["LDA Probability", "DeltaCorr", "Corr"])
-    spectral_col = resolve_column(df, ["Spectral Count", "Count", "Max"])
+    spectral_col = resolve_first_column(df, ["Spectral Count", "Total Spectra", "PSMs", "Spectral_Count", "Count", "Max"])
+    unique_peptide_count_col = resolve_first_column(
+        df, ["Unique Peptides", "Peptide Count", "Unique_Peptides", "Peptides"]
+    )
 
     columns = ["Gene Symbol", "Spectral Count", "Unique Peptides", "LDA Probability"]
     if gene_col is None:
         return pd.DataFrame(columns=columns)
 
-    use_cols = [gene_col] + [c for c in [peptide_col, lda_col, spectral_col] if c]
+    use_cols = [gene_col] + [c for c in [peptide_seq_col, lda_col, spectral_col, unique_peptide_count_col] if c]
     work = df[use_cols].copy()
     work[gene_col] = work[gene_col].astype(str).str.strip().str.upper()
     work = work[(work[gene_col] != "") & (work[gene_col] != "NAN")]
 
     out = work.groupby(gene_col).size().rename("Spectral Count").to_frame()
     if spectral_col:
-        spec = pd.to_numeric(work[spectral_col], errors="coerce").fillna(0)
+        spec = pd.to_numeric(work[spectral_col], errors="coerce").fillna(0.0)
         out["Spectral Count"] = spec.groupby(work[gene_col]).sum()
-    if peptide_col:
-        out["Unique Peptides"] = work.groupby(gene_col)[peptide_col].nunique().reindex(out.index).fillna(0).astype(int)
+    if unique_peptide_count_col:
+        upep = pd.to_numeric(work[unique_peptide_count_col], errors="coerce").fillna(0.0)
+        out["Unique Peptides"] = upep.groupby(work[gene_col]).max().reindex(out.index).fillna(0.0)
+    elif peptide_seq_col:
+        out["Unique Peptides"] = work.groupby(gene_col)[peptide_seq_col].nunique().reindex(out.index).fillna(0).astype(float)
     else:
-        out["Unique Peptides"] = 0
+        out["Unique Peptides"] = 0.0
     if lda_col:
         lda = pd.to_numeric(work[lda_col], errors="coerce").fillna(0.05)
         out["LDA Probability"] = lda.groupby(work[gene_col]).mean().reindex(out.index).fillna(0.05)
@@ -813,6 +872,8 @@ def summarize_experiment(csv_path: Path) -> pd.DataFrame:
         out["LDA Probability"] = 0.05
 
     out = out.reset_index().rename(columns={gene_col: "Gene Symbol"})
+    out["Spectral Count"] = pd.to_numeric(out["Spectral Count"], errors="coerce").fillna(0.0).round().astype(np.int64)
+    out["Unique Peptides"] = pd.to_numeric(out["Unique Peptides"], errors="coerce").fillna(0.0).round().astype(np.int64)
     return out.sort_values("Spectral Count", ascending=False)
 
 

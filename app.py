@@ -747,7 +747,7 @@ if st.session_state["active_tab"] == "Discovery Hub":
         files = hub_meta.to_dict(orient="records")
         for i, row in enumerate(files, start=1):
             e = load_experiment_summary(row["path"], tmt_sn_col_from_row(row))
-            hit = e[e["Gene Symbol"] == gene_query]
+            hit = dp.filter_rows_for_gene(e, gene_query)
             meta_hit = dp.hub_manifest_row_matches_global_query(row, gene_query)
             if not hit.empty:
                 best = hit.sort_values("Spectral Count", ascending=False).iloc[0]
