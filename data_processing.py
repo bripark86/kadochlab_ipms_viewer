@@ -36,6 +36,7 @@ BAF_ALIASES: Dict[str, List[str]] = {
 }
 
 KNOWN_CELL_LINES = [
+    "LncapAR",
     "K562",
     "HEK293T",
     "293T",
