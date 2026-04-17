@@ -676,24 +676,17 @@ if st.session_state["active_tab"] == "Discovery Hub":
     compare_core = st.toggle("Compare with Core BAF", value=False)
 
     if gene_query:
-        def _canonicalize_tech_phrase(s: str) -> str:
-            txt = str(s or "").lower()
-            txt = re.sub(r"[^a-z0-9]+", " ", txt).strip()
-            # Common technical aliases -> canonical search phrase.
-            txt = re.sub(r"\b(amsulf|am sulf|nh4so4|ammonium sulphate)\b", "ammonium sulfate", txt)
-            txt = re.sub(r"\bxl\b", "crosslink", txt)
-            txt = re.sub(r"\bha\b", "ha", txt)
-            return txt
+        def _normalize_for_details_search(s: str) -> str:
+            # Grep-like normalization: case-insensitive and punctuation-tolerant.
+            return re.sub(r"[^a-z0-9]+", " ", str(s or "").lower()).strip()
 
         def _details_match(details_value: str, raw_query: str) -> bool:
-            q = _canonicalize_tech_phrase(raw_query)
+            q = _normalize_for_details_search(raw_query)
             if not q:
                 return True
-            d = _canonicalize_tech_phrase(details_value)
-            if q in d:
-                return True
-            # Also try token-wise matching for short multi-token queries.
+            d = _normalize_for_details_search(details_value)
             q_tokens = [t for t in q.split() if t]
+            # All query words must be present somewhere in Details (order-independent).
             return bool(q_tokens) and all(t in d for t in q_tokens)
 
         hub_meta = enrich_manifest(meta_df_mode)
