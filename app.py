@@ -3,6 +3,7 @@ print("--- APP BOOTING ---")
 import hashlib
 import json
 import math
+import re
 from pathlib import Path
 from typing import Any, Dict, Optional, Union
 
@@ -671,9 +672,30 @@ if st.session_state["active_tab"] == "Discovery Hub":
     _, center, _ = st.columns([1, 2, 1])
     with center:
         gene_query = st.text_input("Gene of Interest", value="SS18").strip().upper()
+    tech_search = st.text_input("🔍 Search Technical Details (e.g. Ammonium Sulfate, XL, HA)", "").strip()
     compare_core = st.toggle("Compare with Core BAF", value=False)
 
     if gene_query:
+        def _canonicalize_tech_phrase(s: str) -> str:
+            txt = str(s or "").lower()
+            txt = re.sub(r"[^a-z0-9]+", " ", txt).strip()
+            # Common technical aliases -> canonical search phrase.
+            txt = re.sub(r"\b(amsulf|am sulf|nh4so4|ammonium sulphate)\b", "ammonium sulfate", txt)
+            txt = re.sub(r"\bxl\b", "crosslink", txt)
+            txt = re.sub(r"\bha\b", "ha", txt)
+            return txt
+
+        def _details_match(details_value: str, raw_query: str) -> bool:
+            q = _canonicalize_tech_phrase(raw_query)
+            if not q:
+                return True
+            d = _canonicalize_tech_phrase(details_value)
+            if q in d:
+                return True
+            # Also try token-wise matching for short multi-token queries.
+            q_tokens = [t for t in q.split() if t]
+            return bool(q_tokens) and all(t in d for t in q_tokens)
+
         hub_meta = enrich_manifest(meta_df_mode)
         if hub_meta.empty:
             st.warning("No experiments available for the selected analysis pipeline.")
@@ -788,7 +810,14 @@ if st.session_state["active_tab"] == "Discovery Hub":
         prog.empty()
 
         if rows:
-            res = pd.DataFrame(rows).sort_values("Spectral Count", ascending=False)
+            res_all = pd.DataFrame(rows).sort_values("Spectral Count", ascending=False)
+            if tech_search:
+                res = res_all[res_all["Details"].apply(lambda d: _details_match(d, tech_search))].copy()
+            else:
+                res = res_all.copy()
+            if res.empty and tech_search:
+                st.info("No experiments found matching those technical criteria.")
+                st.stop()
             res_view = res.drop(columns=["Exp ID"], errors="ignore") if mode_is_tmt else res
             if not mode_is_tmt:
                 res_view = res_view.drop(columns=["Type", "Biological Condition"], errors="ignore")
