@@ -5,7 +5,7 @@ import json
 import math
 import re
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any, Dict, List, Optional, Union
 
 import numpy as np
 import pandas as pd
@@ -338,15 +338,16 @@ def rank_abundance_hockey_stick_figure(
     )
 
     nb_all = work[~work["is_baf"]]
+    nb_vis = nb_all[nb_all["Rank"] <= 500]
     baf = work[work["is_baf"]]
     _ht = "%{customdata[0]}<br>Rank %{customdata[1]}<br>Abundance %{customdata[2]:,.0f}<extra></extra>"
-    if not nb_all.empty:
+    if not nb_vis.empty:
         fig.add_trace(
             go.Scatter(
-                x=nb_all["x_plot"],
-                y=nb_all["y_plot"],
+                x=nb_vis["x_plot"],
+                y=nb_vis["y_plot"],
                 mode="markers",
-                name="Interactors",
+                name="Interactors (rank <= 500)",
                 marker={
                     "size": 6,
                     "color": RANK_PLOT_MUTED_BLUE,
@@ -355,9 +356,9 @@ def rank_abundance_hockey_stick_figure(
                 },
                 customdata=np.column_stack(
                     [
-                        nb_all["Gene Symbol"].astype(str),
-                        nb_all["Rank"].astype(int),
-                        nb_all["Spectral Count"].astype(float),
+                        nb_vis["Gene Symbol"].astype(str),
+                        nb_vis["Rank"].astype(int),
+                        nb_vis["Spectral Count"].astype(float),
                     ]
                 ),
                 hovertemplate=_ht,
@@ -395,47 +396,17 @@ def rank_abundance_hockey_stick_figure(
     )
     label_rows["Gene Symbol"] = label_rows["Gene Symbol"].fillna("")
 
-    baf_part = label_rows[label_rows["is_baf"]].copy()
-    baf_part = baf_part[np.isfinite(baf_part["x_plot"].astype(float)) & np.isfinite(baf_part["y_plot"].astype(float))]
-    baf_offsets: Dict[int, Tuple[int, int]] = {}
-    if not baf_part.empty:
-        cx = float(baf_part["x_plot"].astype(float).mean())
-        cy = float(baf_part["y_plot"].astype(float).mean())
-        baf_part["_theta"] = np.arctan2(
-            baf_part["y_plot"].astype(float).to_numpy() - cy,
-            baf_part["x_plot"].astype(float).to_numpy() - cx,
-        )
-        baf_part = baf_part.sort_values("_theta")
-        n_b = len(baf_part)
-        fan_lo, fan_hi = -math.pi * 0.72, math.pi * 0.72
-        for j, (_, br) in enumerate(baf_part.iterrows()):
-            t = fan_lo + (fan_hi - fan_lo) * (j / max(n_b - 1, 1))
-            r_pix = 74 + (j % 3) * 16
-            ax_b = int(r_pix * math.cos(t))
-            ay_b = int(-r_pix * math.sin(t))
-            baf_offsets[int(br["Rank"])] = (ax_b, ay_b)
-
-    def _non_baf_offsets(rank: int) -> Tuple[int, int]:
-        """Staggered above/below + horizontal spread to separate neighbors."""
-        rk = int(rank)
-        if rk % 2 == 0:
-            ay_p = -40
-        else:
-            ay_p = -80
-        if (rk % 4) >= 2:
-            ay_p = 48
-        ax_p = -52 + (rk % 7) * 17
-        if (rk // 2) % 2 == 1:
-            ax_p = -ax_p
-        return ax_p, ay_p
-
-    for _, r in label_rows.iterrows():
+    _ay_offsets = [-40.0, -70.0, -100.0]
+    _ax_offsets = [44.0, -44.0, 58.0, -58.0]
+    for i, (_, r) in enumerate(label_rows.iterrows()):
         _is_b = bool(r["is_baf"])
         rk = int(r["Rank"])
+        ay_p = _ay_offsets[i % len(_ay_offsets)]
+        ax_p = _ax_offsets[i % len(_ax_offsets)]
         if _is_b:
-            ax_p, ay_p = baf_offsets.get(rk, (-50, -60))
-        else:
-            ax_p, ay_p = _non_baf_offsets(rk)
+            # Give BAF labels a little extra radial push away from the cluster.
+            ax_p *= 1.35
+            ay_p *= 1.20
         raw_rank = float(rk)
         raw_abundance = float(pd.to_numeric(r["Spectral Count"], errors="coerce"))
         if not np.isfinite(raw_rank) or not np.isfinite(raw_abundance):
@@ -448,8 +419,6 @@ def rank_abundance_hockey_stick_figure(
         else:
             y_val = float(raw_abundance)
         if not np.isfinite(x_val) or not np.isfinite(y_val):
-            continue
-        if use_log10 and (x_val <= 0 or y_val <= 0):
             continue
         gene_txt = str(r["Gene Symbol"]).strip()
         if not gene_txt:
@@ -801,7 +770,7 @@ if st.session_state["active_tab"] == "Dataset Browser":
         st.caption(
             "Proteins ranked by abundance (spectral count for CSV; summed S:N for TMT). "
             "Log10: **Log10** uses log10(rank) and log10(abundance + 1); **Linear** keeps log10(rank) with linear abundance. "
-            "Shadow rank curve; blue interactors (all ranks); red BAF diamonds. Hover: symbol, rank, raw abundance."
+            "Shadow rank curve; blue interactors (top 500 only); red BAF diamonds. Hover: symbol, rank, raw abundance."
         )
 
     coverage = exp.copy()
@@ -1328,7 +1297,7 @@ if st.session_state["active_tab"] == "Comparative Analysis":
             )
         st.caption(
             "Same scale options as Dataset Browser: **Log10** = log10(rank) and log10(abundance + 1); "
-            "**Linear** = log10(rank) with linear abundance. Hover shows symbol, rank, raw abundance."
+            "**Linear** = log10(rank) with linear abundance. Blue markers show top 500 interactors; BAF are always shown."
         )
 
         df1 = a_exp[["Gene Symbol", "Spectral Count"]]
