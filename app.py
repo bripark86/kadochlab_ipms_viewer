@@ -278,63 +278,104 @@ def highlight_target_cell(val: str) -> str:
     return f"background-color: {SOFT_BLUE}; color: {TEXT_DARK};"
 
 
-def volcano_plot(
+def rank_abundance_hockey_stick_figure(
     df: pd.DataFrame,
     title: str,
-    stats_valid: bool = True,
-    x_axis_title: str = "Log10(Spectral Count + 1)",
+    *,
+    abundance_axis_is_tmt: bool = False,
+    use_log10: bool = True,
 ) -> go.Figure:
-    plot_df = df.copy()
-    plot_df["is_baf"] = plot_df["Gene Symbol"].apply(is_baf_gene)
-    plot_df["x"] = plot_df["Spectral Count"].apply(lambda v: math.log10(float(v) + 1))
-    if not stats_valid:
-        plot_df["y"] = 0.0
-    elif "y_axis_val" in plot_df.columns:
-        plot_df["y"] = plot_df["y_axis_val"]
-    else:
-        lda = pd.to_numeric(plot_df["LDA Probability"], errors="coerce")
-        valid_lda = (lda > 0) & (lda <= 1)
-        y_axis = np.full(len(plot_df), np.nan, dtype=float)
-        if valid_lda.any():
-            y_axis[valid_lda.to_numpy()] = -np.log10(lda[valid_lda].to_numpy())
-        plot_df["y"] = y_axis
-    plot_df["high_conf"] = plot_df["LDA Probability"] >= 0.8
-    if stats_valid:
-        plot_df = plot_df.dropna(subset=["y"])
-
+    """
+    Rank–abundance (hockey stick): X = rank by Spectral Count (desc), Y = abundance (log or linear).
+    No LDA / p-values required. BAF subunits highlighted as red diamonds.
+    """
     fig = go.Figure()
-    other = plot_df[(~plot_df["is_baf"]) & (~plot_df["high_conf"])]
-    high = plot_df[(~plot_df["is_baf"]) & (plot_df["high_conf"])]
-    baf = plot_df[plot_df["is_baf"]]
+    if df.empty or "Gene Symbol" not in df.columns or "Spectral Count" not in df.columns:
+        fig.update_layout(title=title, plot_bgcolor=BG_WHITE, paper_bgcolor=BG_WHITE)
+        return fig
+
+    work = df[["Gene Symbol", "Spectral Count"]].copy()
+    work["Spectral Count"] = pd.to_numeric(work["Spectral Count"], errors="coerce").fillna(0.0)
+    work = work.sort_values("Spectral Count", ascending=False).reset_index(drop=True)
+    work["Rank"] = np.arange(1, len(work) + 1, dtype=int)
+    work["is_baf"] = work["Gene Symbol"].apply(is_baf_gene)
+    if use_log10:
+        work["y_plot"] = np.log10(np.maximum(work["Spectral Count"].to_numpy(dtype=float), 0.0) + 1.0)
+        yaxis_title = (
+            "Log10(summed S:N + 1)" if abundance_axis_is_tmt else "Log10(spectral count + 1)"
+        )
+    else:
+        work["y_plot"] = work["Spectral Count"].astype(float)
+        yaxis_title = "Summed signal-to-noise (TMT)" if abundance_axis_is_tmt else "Spectral count"
+
+    x_all = work["Rank"].to_numpy()
+    y_all = work["y_plot"].to_numpy()
     fig.add_trace(
         go.Scatter(
-            x=other["x"], y=other["y"], mode="markers", name="Interactors", marker={"size": 7, "color": OCEAN_BLUE, "opacity": 0.55}, text=other["Gene Symbol"]
+            x=x_all,
+            y=y_all,
+            mode="lines",
+            line={"color": "#c8ccd4", "width": 1.5},
+            name="Rank curve",
+            hoverinfo="skip",
+            showlegend=True,
         )
     )
-    fig.add_trace(
-        go.Scatter(
-            x=high["x"], y=high["y"], mode="markers", name="High-confidence", marker={"size": 8, "color": EMERALD, "opacity": 0.9}, text=high["Gene Symbol"]
-        )
-    )
-    fig.add_trace(
-        go.Scatter(
-            x=baf["x"], y=baf["y"], mode="markers", name="BAF subunits", marker={"size": 12, "color": BAF_RED, "symbol": "diamond"}, text=baf["Gene Symbol"]
-        )
-    )
-    if not stats_valid:
+
+    nb = work[~work["is_baf"]]
+    baf = work[work["is_baf"]]
+    if not nb.empty:
         fig.add_trace(
             go.Scatter(
-                x=[None],
-                y=[None],
+                x=nb["Rank"],
+                y=nb["y_plot"],
                 mode="markers",
-                marker={"opacity": 0},
-                name="Y-axis values are placeholders due to missing stats.",
-                showlegend=True,
+                name="Interactors",
+                marker={"size": 7, "color": OCEAN_BLUE, "opacity": 0.75, "line": {"width": 0}},
+                text=nb["Gene Symbol"],
+                customdata=nb["Spectral Count"].to_numpy(),
+                hovertemplate="<b>%{text}</b><br>Rank %{x}<br>Intensity %{customdata:,.0f}<extra></extra>",
             )
         )
-    fig.update_layout(title=title, xaxis_title=x_axis_title, yaxis_title="-Log10(LDA Probability)", plot_bgcolor=BG_WHITE, paper_bgcolor=BG_WHITE)
-    if not stats_valid:
-        fig.update_yaxes(range=[0, 1])
+    if not baf.empty:
+        fig.add_trace(
+            go.Scatter(
+                x=baf["Rank"],
+                y=baf["y_plot"],
+                mode="markers",
+                name="BAF subunits",
+                marker={"size": 14, "color": BAF_RED, "symbol": "diamond", "opacity": 0.95, "line": {"width": 0}},
+                text=baf["Gene Symbol"],
+                customdata=baf["Spectral Count"].to_numpy(),
+                hovertemplate="<b>%{text}</b><br>Rank %{x}<br>Intensity %{customdata:,.0f}<extra></extra>",
+            )
+        )
+
+    n_label = min(10, max(1, len(work)))
+    for i, (_, r) in enumerate(work.head(n_label).iterrows()):
+        fig.add_annotation(
+            x=r["Rank"],
+            y=r["y_plot"],
+            text=str(r["Gene Symbol"]),
+            showarrow=True,
+            arrowhead=2,
+            arrowsize=1,
+            arrowwidth=1,
+            arrowcolor="#9ca3af",
+            ax=0,
+            ay=-20 - (i % 4) * 12,
+            font={"size": 10, "color": TEXT_DARK},
+        )
+
+    fig.update_layout(
+        title=title,
+        xaxis_title="Rank (1 = most abundant)",
+        yaxis_title=yaxis_title,
+        plot_bgcolor=BG_WHITE,
+        paper_bgcolor=BG_WHITE,
+        legend={"orientation": "h", "yanchor": "bottom", "y": 1.02, "xanchor": "left", "x": 0},
+        xaxis={"range": [0.5, len(work) + 0.5]},
+    )
     return fig
 
 
@@ -616,11 +657,26 @@ if st.session_state["active_tab"] == "Dataset Browser":
     m2.metric("BAF Subunits (Ranked)", f"{baf_count}/26")
     m3.metric("Top Interactor", top_interactor)
 
-    x_title = "Summed Signal-to-Noise (TMT)" if is_tmt else "Log10(Spectral Count + 1)"
     if not exp.empty:
+        st.markdown("#### Rank–abundance (hockey stick)")
+        _scale = st.radio(
+            "Scale Type",
+            ["Log10", "Linear"],
+            horizontal=True,
+            key="dataset_browser_rank_scale",
+        )
         st.plotly_chart(
-            volcano_plot(exp, "Experiment Scatter", stats_valid=st.session_state["stats_valid"], x_axis_title=x_title),
+            rank_abundance_hockey_stick_figure(
+                exp,
+                "Experiment rank plot",
+                abundance_axis_is_tmt=is_tmt,
+                use_log10=(_scale == "Log10"),
+            ),
             use_container_width=True,
+        )
+        st.caption(
+            "Proteins ranked by abundance (spectral count for CSV; summed S:N for TMT). "
+            "Gray line: rank curve; blue: interactors; red diamonds: BAF subunits. Top 10 genes labeled."
         )
 
     coverage = exp.copy()
@@ -1115,20 +1171,34 @@ if st.session_state["active_tab"] == "Comparative Analysis":
         b_row = enrich_manifest(meta_df_mode[meta_df_mode["file_name"] == b_file]).iloc[0]
         a_sn, b_sn = tmt_sn_col_from_row(a_row), tmt_sn_col_from_row(b_row)
         a_exp = load_and_process_file(a_row["path"], a_sn)
-        a_stats_valid = st.session_state.get("stats_valid", True)
         b_exp = load_and_process_file(b_row["path"], b_sn)
-        b_stats_valid = st.session_state.get("stats_valid", True)
-        xa = "Summed Signal-to-Noise (TMT)" if a_sn else "Log10(Spectral Count + 1)"
-        xb = "Summed Signal-to-Noise (TMT)" if b_sn else "Log10(Spectral Count + 1)"
+        st.markdown("#### Rank–abundance (pair)")
+        _cmp_scale = st.radio(
+            "Scale Type",
+            ["Log10", "Linear"],
+            horizontal=True,
+            key="comparative_rank_scale",
+        )
+        _cmp_log = _cmp_scale == "Log10"
         c1, c2 = st.columns(2)
         with c1:
             st.plotly_chart(
-                volcano_plot(a_exp, f"Scatter: {a_file}", stats_valid=a_stats_valid, x_axis_title=xa),
+                rank_abundance_hockey_stick_figure(
+                    a_exp,
+                    f"Rank plot: {a_file}",
+                    abundance_axis_is_tmt=bool(a_sn),
+                    use_log10=_cmp_log,
+                ),
                 use_container_width=True,
             )
         with c2:
             st.plotly_chart(
-                volcano_plot(b_exp, f"Scatter: {b_file}", stats_valid=b_stats_valid, x_axis_title=xb),
+                rank_abundance_hockey_stick_figure(
+                    b_exp,
+                    f"Rank plot: {b_file}",
+                    abundance_axis_is_tmt=bool(b_sn),
+                    use_log10=_cmp_log,
+                ),
                 use_container_width=True,
             )
 
