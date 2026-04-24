@@ -287,9 +287,9 @@ def rank_abundance_hockey_stick_figure(
     use_log10: bool = True,
 ) -> go.Figure:
     """
-    Rank–abundance (hockey stick): X = log10(rank), Y = abundance (log or linear).
-    Thin rank curve; blue markers only for rank ≤ 500 (non-BAF); large BAF diamonds on top;
-    leader-line annotations for top 5 + all BAF.
+    Log–log rank–abundance: X = log10(rank), Y = log10(spectral + 1) (safe for zeros).
+    Shadow curve for depth; small blue dots, larger red BAF diamonds; leader lines for top 5 + BAF.
+    If ``use_log10`` is False, Y uses raw abundance (semi-log: log rank only).
     """
     _sans = "Inter, 'Segoe UI', 'Helvetica Neue', Arial, sans-serif"
     fig = go.Figure()
@@ -314,12 +314,23 @@ def rank_abundance_hockey_stick_figure(
 
     x_all = work["x_plot"].to_numpy()
     y_all = work["y_plot"].to_numpy()
+    # Shadow “ribbon” then crisp curve (depth, log–log S-curve)
     fig.add_trace(
         go.Scatter(
             x=x_all,
             y=y_all,
             mode="lines",
-            line={"color": "lightgray", "width": 1},
+            line={"color": "rgba(173, 216, 230, 0.42)", "width": 6},
+            hoverinfo="skip",
+            showlegend=False,
+        )
+    )
+    fig.add_trace(
+        go.Scatter(
+            x=x_all,
+            y=y_all,
+            mode="lines",
+            line={"color": "rgba(160, 180, 200, 0.55)", "width": 2},
             name="Rank curve",
             hoverinfo="skip",
             showlegend=True,
@@ -327,29 +338,26 @@ def rank_abundance_hockey_stick_figure(
     )
 
     nb_all = work[~work["is_baf"]]
-    nb_vis = nb_all[nb_all["Rank"] <= 500]
     baf = work[work["is_baf"]]
-    _ht = (
-        "Protein: %{customdata[0]}<br>Rank: %{customdata[1]}<br>Abundance: %{customdata[2]:,.0f}<extra></extra>"
-    )
-    if not nb_vis.empty:
+    _ht = "%{customdata[0]}<br>Rank %{customdata[1]}<br>Abundance %{customdata[2]:,.0f}<extra></extra>"
+    if not nb_all.empty:
         fig.add_trace(
             go.Scatter(
-                x=nb_vis["x_plot"],
-                y=nb_vis["y_plot"],
+                x=nb_all["x_plot"],
+                y=nb_all["y_plot"],
                 mode="markers",
-                name="Interactors (rank ≤ 500)",
+                name="Interactors",
                 marker={
-                    "size": 7,
+                    "size": 6,
                     "color": RANK_PLOT_MUTED_BLUE,
-                    "opacity": 0.9,
+                    "opacity": 0.88,
                     "line": {"width": 0},
                 },
                 customdata=np.column_stack(
                     [
-                        nb_vis["Gene Symbol"].astype(str),
-                        nb_vis["Rank"].astype(int),
-                        nb_vis["Spectral Count"].astype(float),
+                        nb_all["Gene Symbol"].astype(str),
+                        nb_all["Rank"].astype(int),
+                        nb_all["Spectral Count"].astype(float),
                     ]
                 ),
                 hovertemplate=_ht,
@@ -363,10 +371,10 @@ def rank_abundance_hockey_stick_figure(
                 mode="markers",
                 name="BAF subunits",
                 marker={
-                    "size": 28,
+                    "size": 12,
                     "color": BAF_RED,
                     "symbol": "diamond",
-                    "opacity": 0.98,
+                    "opacity": 0.96,
                     "line": {"width": 0.5, "color": "#cc3333"},
                 },
                 customdata=np.column_stack(
@@ -736,8 +744,8 @@ if st.session_state["active_tab"] == "Dataset Browser":
         )
         st.caption(
             "Proteins ranked by abundance (spectral count for CSV; summed S:N for TMT). "
-            "X-axis is log10(rank). Blue dots only for rank ≤ 500; thin gray rank curve. "
-            "Leader lines: top 5 proteins plus every BAF diamond (red arrows). Hover shows raw abundance."
+            "Log10: **Log10** uses log10(rank) and log10(abundance + 1); **Linear** keeps log10(rank) with linear abundance. "
+            "Shadow rank curve; blue interactors (all ranks); red BAF diamonds. Hover: symbol, rank, raw abundance."
         )
 
     coverage = exp.copy()
@@ -1262,6 +1270,10 @@ if st.session_state["active_tab"] == "Comparative Analysis":
                 ),
                 use_container_width=True,
             )
+        st.caption(
+            "Same scale options as Dataset Browser: **Log10** = log10(rank) and log10(abundance + 1); "
+            "**Linear** = log10(rank) with linear abundance. Hover shows symbol, rank, raw abundance."
+        )
 
         df1 = a_exp[["Gene Symbol", "Spectral Count"]]
         df2 = b_exp[["Gene Symbol", "Spectral Count"]]
