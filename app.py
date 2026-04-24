@@ -288,11 +288,13 @@ def rank_abundance_hockey_stick_figure(
 ) -> go.Figure:
     """
     Rank–abundance (hockey stick): X = log10(rank), Y = abundance (log or linear).
-    BAF subunits: large red diamonds; interactors: muted blue. Labels only for top 10 + all BAF hits.
+    Thin rank curve; blue markers only for rank ≤ 500 (non-BAF); large BAF diamonds on top;
+    leader-line annotations for top 5 + all BAF.
     """
+    _sans = "Inter, 'Segoe UI', 'Helvetica Neue', Arial, sans-serif"
     fig = go.Figure()
     if df.empty or "Gene Symbol" not in df.columns or "Spectral Count" not in df.columns:
-        fig.update_layout(title=title, plot_bgcolor=BG_WHITE, paper_bgcolor=BG_WHITE)
+        fig.update_layout(title=title, plot_bgcolor=BG_WHITE, paper_bgcolor=BG_WHITE, font={"family": _sans})
         return fig
 
     work = df[["Gene Symbol", "Spectral Count"]].copy()
@@ -317,25 +319,26 @@ def rank_abundance_hockey_stick_figure(
             x=x_all,
             y=y_all,
             mode="lines",
-            line={"color": "rgba(200, 200, 200, 0.5)", "width": 0.8},
+            line={"color": "lightgray", "width": 1},
             name="Rank curve",
             hoverinfo="skip",
             showlegend=True,
         )
     )
 
-    nb = work[~work["is_baf"]]
+    nb_all = work[~work["is_baf"]]
+    nb_vis = nb_all[nb_all["Rank"] <= 500]
     baf = work[work["is_baf"]]
     _ht = (
         "Protein: %{customdata[0]}<br>Rank: %{customdata[1]}<br>Abundance: %{customdata[2]:,.0f}<extra></extra>"
     )
-    if not nb.empty:
+    if not nb_vis.empty:
         fig.add_trace(
             go.Scatter(
-                x=nb["x_plot"],
-                y=nb["y_plot"],
+                x=nb_vis["x_plot"],
+                y=nb_vis["y_plot"],
                 mode="markers",
-                name="Interactors",
+                name="Interactors (rank ≤ 500)",
                 marker={
                     "size": 7,
                     "color": RANK_PLOT_MUTED_BLUE,
@@ -343,7 +346,11 @@ def rank_abundance_hockey_stick_figure(
                     "line": {"width": 0},
                 },
                 customdata=np.column_stack(
-                    [nb["Gene Symbol"].astype(str), nb["Rank"].astype(int), nb["Spectral Count"].astype(float)]
+                    [
+                        nb_vis["Gene Symbol"].astype(str),
+                        nb_vis["Rank"].astype(int),
+                        nb_vis["Spectral Count"].astype(float),
+                    ]
                 ),
                 hovertemplate=_ht,
             )
@@ -356,7 +363,7 @@ def rank_abundance_hockey_stick_figure(
                 mode="markers",
                 name="BAF subunits",
                 marker={
-                    "size": 22,
+                    "size": 28,
                     "color": BAF_RED,
                     "symbol": "diamond",
                     "opacity": 0.98,
@@ -369,24 +376,39 @@ def rank_abundance_hockey_stick_figure(
             )
         )
 
-    # Labels: top 10 by rank union every BAF row (dedupe by index)
-    label_ix = set(work.head(min(10, len(work))).index.tolist())
+    # Leader lines: top 5 overall + every BAF (pixel offsets ax, ay from point to label)
+    label_ix = set(work.head(min(5, len(work))).index.tolist())
     label_ix.update(work.index[work["is_baf"]].tolist())
     label_rows = work.loc[sorted(label_ix)].drop_duplicates(subset=["Rank"], keep="first").sort_values("Rank")
-    if not label_rows.empty:
-        _pos_cycle = ("top center", "top left", "top right", "middle left", "middle right", "bottom center")
-        _positions = [_pos_cycle[i % len(_pos_cycle)] for i in range(len(label_rows))]
-        fig.add_trace(
-            go.Scatter(
-                x=label_rows["x_plot"],
-                y=label_rows["y_plot"],
-                mode="text",
-                text=label_rows["Gene Symbol"].astype(str),
-                textposition=_positions,
-                textfont={"size": 11, "color": TEXT_DARK},
-                showlegend=False,
-                hoverinfo="skip",
-            )
+    _leader_offsets = [
+        (0, -55),
+        (50, -48),
+        (-52, -44),
+        (54, 42),
+        (-48, 50),
+        (0, 58),
+        (45, -52),
+        (-55, 46),
+    ]
+    for i, (_, r) in enumerate(label_rows.iterrows()):
+        ax_p, ay_p = _leader_offsets[i % len(_leader_offsets)]
+        _is_b = bool(r["is_baf"])
+        fig.add_annotation(
+            xref="x",
+            yref="y",
+            x=float(r["x_plot"]),
+            y=float(r["y_plot"]),
+            ax=ax_p,
+            ay=ay_p,
+            text=str(r["Gene Symbol"]),
+            showarrow=True,
+            arrowhead=2,
+            arrowsize=1,
+            arrowwidth=1,
+            arrowcolor=BAF_RED if _is_b else "#9ca3af",
+            font={"family": _sans, "size": 11, "color": TEXT_DARK},
+            bgcolor="rgba(255,255,255,0.85)",
+            borderpad=2,
         )
 
     _max_r = int(work["Rank"].max())
@@ -398,6 +420,7 @@ def rank_abundance_hockey_stick_figure(
     _x_lo = float(np.log10(max(_max_r, 1))) * 1.02
     fig.update_layout(
         title=title,
+        font={"family": _sans},
         xaxis_title="Rank (log10 scale)",
         yaxis_title=yaxis_title,
         plot_bgcolor=BG_WHITE,
@@ -408,7 +431,10 @@ def rank_abundance_hockey_stick_figure(
             "tickmode": "array",
             "tickvals": np.log10(np.array(_ticks, dtype=float)),
             "ticktext": [str(r) for r in _ticks],
+            "showgrid": False,
+            "zeroline": False,
         },
+        yaxis={"showgrid": False, "zeroline": False},
     )
     return fig
 
@@ -710,8 +736,8 @@ if st.session_state["active_tab"] == "Dataset Browser":
         )
         st.caption(
             "Proteins ranked by abundance (spectral count for CSV; summed S:N for TMT). "
-            "X-axis is log10(rank) to spread the top ~100 proteins. Muted blue: interactors; large red diamonds: BAF subunits. "
-            "Labels: top 10 by abundance plus every BAF hit. Hover shows raw abundance."
+            "X-axis is log10(rank). Blue dots only for rank ≤ 500; thin gray rank curve. "
+            "Leader lines: top 5 proteins plus every BAF diamond (red arrows). Hover shows raw abundance."
         )
 
     coverage = exp.copy()
