@@ -12,12 +12,15 @@ import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
+import streamlit.components.v1 as components
 
 import data_processing as dp
 
 st.set_page_config(page_title="IPMS Viewer", layout="wide")
 
 DATA_ROOT = Path("Data")
+# Optional: paste your Google Form embed URL here, or set Streamlit secret FEEDBACK_FORM_URL
+FEEDBACK_FORM_EMBED_URL = ""
 OVERRIDES_PATH = Path("metadata_overrides.json")
 
 
@@ -542,7 +545,7 @@ if "stats_valid" not in st.session_state:
 if "app_mode" not in st.session_state:
     st.session_state["app_mode"] = MODE_CSV
 
-tab_options = ["Dataset Browser", "Discovery Hub", "Comparative Analysis", "Data Management"]
+tab_options = ["Dataset Browser", "Discovery Hub", "Comparative Analysis", "Data Management", "Feedback"]
 if st.session_state["active_tab"] not in tab_options:
     st.session_state["active_tab"] = "Dataset Browser"
 
@@ -1365,6 +1368,24 @@ if st.session_state["active_tab"] == "Data Management":
             get_path_metadata.clear()
             load_experiment_summary.clear()
             st.warning(f"Deleted: {delete_file}")
+
+if st.session_state["active_tab"] == "Feedback":
+    st.header("🚀 Help us improve the BAF IP-MS Viewer")
+    st.subheader("Found a bug? Want a new chart? Let us know below.")
+    _form_url = FEEDBACK_FORM_EMBED_URL.strip()
+    if not _form_url:
+        try:
+            _form_url = str(st.secrets["FEEDBACK_FORM_URL"]).strip()
+        except Exception:
+            _form_url = ""
+    if _form_url:
+        components.iframe(_form_url, height=800, scrolling=True)
+    else:
+        st.info(
+            "Set your Google Form **embed** URL: add `FEEDBACK_FORM_URL` to `.streamlit/secrets.toml`, "
+            "or set `FEEDBACK_FORM_EMBED_URL` in `app.py`. Use the form’s share link with `?embedded=true` "
+            "(e.g. `https://docs.google.com/forms/d/e/<id>/viewform?embedded=true`)."
+        )
 
 if st.session_state["active_tab"] == "Admin Control":
     section_header("Admin Control", OCEAN_BLUE)
