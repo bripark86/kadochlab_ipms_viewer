@@ -5,7 +5,7 @@ import json
 import math
 import re
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 import numpy as np
 import pandas as pd
@@ -384,23 +384,51 @@ def rank_abundance_hockey_stick_figure(
             )
         )
 
-    # Leader lines: top 5 overall + every BAF (pixel offsets ax, ay from point to label)
+    # Leader lines: top 5 overall + every BAF (pixel offsets ax, ay from point to label text)
     label_ix = set(work.head(min(5, len(work))).index.tolist())
     label_ix.update(work.index[work["is_baf"]].tolist())
     label_rows = work.loc[sorted(label_ix)].drop_duplicates(subset=["Rank"], keep="first").sort_values("Rank")
-    _leader_offsets = [
-        (0, -55),
-        (50, -48),
-        (-52, -44),
-        (54, 42),
-        (-48, 50),
-        (0, 58),
-        (45, -52),
-        (-55, 46),
-    ]
-    for i, (_, r) in enumerate(label_rows.iterrows()):
-        ax_p, ay_p = _leader_offsets[i % len(_leader_offsets)]
+
+    baf_part = label_rows[label_rows["is_baf"]].copy()
+    baf_offsets: Dict[int, Tuple[int, int]] = {}
+    if not baf_part.empty:
+        cx = float(baf_part["x_plot"].astype(float).mean())
+        cy = float(baf_part["y_plot"].astype(float).mean())
+        baf_part["_theta"] = np.arctan2(
+            baf_part["y_plot"].astype(float).to_numpy() - cy,
+            baf_part["x_plot"].astype(float).to_numpy() - cx,
+        )
+        baf_part = baf_part.sort_values("_theta")
+        n_b = len(baf_part)
+        fan_lo, fan_hi = -math.pi * 0.72, math.pi * 0.72
+        for j, (_, br) in enumerate(baf_part.iterrows()):
+            t = fan_lo + (fan_hi - fan_lo) * (j / max(n_b - 1, 1))
+            r_pix = 74 + (j % 3) * 16
+            ax_b = int(r_pix * math.cos(t))
+            ay_b = int(-r_pix * math.sin(t))
+            baf_offsets[int(br["Rank"])] = (ax_b, ay_b)
+
+    def _non_baf_offsets(rank: int) -> Tuple[int, int]:
+        """Staggered above/below + horizontal spread to separate neighbors."""
+        rk = int(rank)
+        if rk % 2 == 0:
+            ay_p = -40
+        else:
+            ay_p = -80
+        if (rk % 4) >= 2:
+            ay_p = 48
+        ax_p = -52 + (rk % 7) * 17
+        if (rk // 2) % 2 == 1:
+            ax_p = -ax_p
+        return ax_p, ay_p
+
+    for _, r in label_rows.iterrows():
         _is_b = bool(r["is_baf"])
+        rk = int(r["Rank"])
+        if _is_b:
+            ax_p, ay_p = baf_offsets.get(rk, (-50, -60))
+        else:
+            ax_p, ay_p = _non_baf_offsets(rk)
         fig.add_annotation(
             xref="x",
             yref="y",
@@ -410,13 +438,14 @@ def rank_abundance_hockey_stick_figure(
             ay=ay_p,
             text=str(r["Gene Symbol"]),
             showarrow=True,
-            arrowhead=2,
-            arrowsize=1,
-            arrowwidth=1,
-            arrowcolor=BAF_RED if _is_b else "#9ca3af",
+            arrowhead=0,
+            arrowwidth=0.5,
+            arrowcolor="darkgray",
+            arrowsize=0.6,
             font={"family": _sans, "size": 11, "color": TEXT_DARK},
             bgcolor="rgba(255,255,255,0.85)",
             borderpad=2,
+            cliponaxis=False,
         )
 
     _max_r = int(work["Rank"].max())
@@ -433,6 +462,7 @@ def rank_abundance_hockey_stick_figure(
         yaxis_title=yaxis_title,
         plot_bgcolor=BG_WHITE,
         paper_bgcolor=BG_WHITE,
+        margin={"l": 72, "r": 72, "t": 96, "b": 72},
         legend={"orientation": "h", "yanchor": "bottom", "y": 1.02, "xanchor": "left", "x": 0},
         xaxis={
             "range": [-0.05, _x_lo],
@@ -441,8 +471,9 @@ def rank_abundance_hockey_stick_figure(
             "ticktext": [str(r) for r in _ticks],
             "showgrid": False,
             "zeroline": False,
+            "automargin": True,
         },
-        yaxis={"showgrid": False, "zeroline": False},
+        yaxis={"showgrid": False, "zeroline": False, "automargin": True},
     )
     return fig
 
