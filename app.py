@@ -5,7 +5,7 @@ import json
 import math
 import re
 from pathlib import Path
-from typing import Any, Dict, Optional, Union
+from typing import Any, Dict, List, Optional, Union
 
 import numpy as np
 import pandas as pd
@@ -672,94 +672,209 @@ if st.session_state["active_tab"] == "Discovery Hub":
     _, center, _ = st.columns([1, 2, 1])
     with center:
         gene_query = st.text_input("Gene of Interest", value="SS18").strip().upper()
-    tech_search = st.text_input("🔍 Search Technical Details (e.g. Ammonium Sulfate, XL, HA)", "").strip()
     compare_core = st.toggle("Compare with Core BAF", value=False)
 
-    if gene_query:
-        def _normalize_for_details_search(s: str) -> str:
-            # Grep-like normalization: case-insensitive and punctuation-tolerant.
-            return re.sub(r"[^a-z0-9]+", " ", str(s or "").lower()).strip()
+    if not gene_query:
+        st.info("Enter a gene symbol to search.")
+        st.stop()
 
-        def _details_match(details_value: str, raw_query: str) -> bool:
-            q = _normalize_for_details_search(raw_query)
-            if not q:
-                return True
-            d = _normalize_for_details_search(details_value)
-            q_tokens = [t for t in q.split() if t]
-            # All query words must be present somewhere in Details (order-independent).
-            return bool(q_tokens) and all(t in d for t in q_tokens)
+    def _normalize_for_details_search(s: str) -> str:
+        return re.sub(r"[^a-z0-9]+", " ", str(s or "").lower()).strip()
 
-        hub_meta = enrich_manifest(meta_df_mode)
-        if hub_meta.empty:
-            st.warning("No experiments available for the selected analysis pipeline.")
-            st.stop()
-        bait_for_consensus = dp.resolve_search_as_bait(gene_query)
+    def _details_match(details_value: str, raw_query: str) -> bool:
+        q = _normalize_for_details_search(raw_query)
+        if not q:
+            return True
+        d = _normalize_for_details_search(details_value)
+        q_tokens = [t for t in q.split() if t]
+        return bool(q_tokens) and all(t in d for t in q_tokens)
 
-        if bait_for_consensus is not None:
-            bait_runs = hub_meta[
-                hub_meta["target"].apply(lambda t: dp.manifest_row_matches_bait(str(t), bait_for_consensus))
-            ].copy()
-            st.markdown("### Primary target — enrichment profile")
-            if bait_for_consensus == "CEBPE":
-                st.caption(f"Indexed experiments where **CEBPE** is the IP bait (primary target outside the 26 BAF core).")
-            else:
-                st.caption(f"Indexed experiments where **{bait_for_consensus}** is the IP bait.")
-            if not bait_runs.empty:
-                enrich_cols = bait_runs[
-                    ["investigator", "session_id", "cell_line", "sample_label", "details", "display_name", "full_filename"]
-                ].rename(
-                    columns={
-                        "investigator": "Investigator",
-                        "session_id": "Exp ID",
-                        "cell_line": "Cell Line",
-                        "sample_label": "Sample Label",
-                        "details": "Details",
-                        "display_name": "Display Name",
-                        "full_filename": "Full Filename",
-                    }
-                )
-                enrich_view = enrich_cols.sort_values("Exp ID")
-                if mode_is_tmt and "Exp ID" in enrich_view.columns:
-                    enrich_view = enrich_view.drop(columns=["Exp ID"])
-                if not mode_is_tmt:
-                    enrich_view = enrich_view.drop(columns=["Type", "Biological Condition"], errors="ignore")
-                st.dataframe(
-                    enrich_view,
-                    use_container_width=True,
-                    column_config={
-                        "Details": st.column_config.TextColumn("Details", width="large", help="Specific experimental details")
-                    },
-                )
-            else:
-                st.info(f"No runs indexed with bait target **{bait_for_consensus}**.")
+    def _discovery_select_options(series: pd.Series) -> List[str]:
+        vals = sorted(
+            {
+                str(x).strip()
+                for x in series.dropna().unique()
+                if str(x).strip() and str(x).strip().lower() not in ("nan", "none")
+            }
+        )
+        return ["All"] + vals
 
-            st.markdown("### Primary target — consensus interactors")
-            st.caption(f"Mean spectral counts across {len(bait_runs)} run(s) with bait **{bait_for_consensus}**.")
-            if not bait_runs.empty:
-                all_rows = []
-                for _, row in bait_runs.iterrows():
-                    e = load_experiment_summary(row["path"], tmt_sn_col_from_row(row)).copy()
-                    e["exp_id"] = row["session_id"]
-                    all_rows.append(e)
-                merged_c = pd.concat(all_rows, ignore_index=True)
-                prevalence = merged_c.groupby("Gene Symbol")["exp_id"].nunique()
-                thr = max(1, math.ceil(len(bait_runs) * 0.5))
-                keep = prevalence[prevalence >= thr].index
-                consensus = (
-                    merged_c[merged_c["Gene Symbol"].isin(keep)]
-                    .groupby("Gene Symbol", as_index=False)
-                    .agg(Mean_Spectral_Count=("Spectral Count", "mean"), Mean_Unique_Peptides=("Unique Peptides", "mean"), Runs_Present=("exp_id", "nunique"))
-                    .sort_values("Mean_Spectral_Count", ascending=False)
-                )
-                consensus["Prevalence Score (%)"] = (consensus["Runs_Present"] / len(bait_runs) * 100).round(1)
-                st.dataframe(consensus, use_container_width=True)
-            else:
-                st.info("No consensus table (no bait-matched runs).")
+    hub_meta = enrich_manifest(meta_df_mode)
+    if hub_meta.empty:
+        st.warning("No experiments available for the selected analysis pipeline.")
+        st.stop()
 
-        st.markdown("### Global Results")
-        rows = []
+    _tag_df = hub_meta.apply(
+        lambda r: pd.Series(
+            dp.discovery_filter_tag_row(
+                r.get("details"),
+                r.get("sample_label"),
+                r.get("biological_condition"),
+            )
+        ),
+        axis=1,
+    )
+    hub_ctx = pd.concat([hub_meta.reset_index(drop=True), _tag_df], axis=1)
+    if "experiment_type" in hub_ctx.columns:
+        hub_ctx["experiment_type"] = hub_ctx["experiment_type"].fillna("Unknown").astype(str)
+    else:
+        hub_ctx["experiment_type"] = "Unknown"
+
+    st.markdown("#### Filter experiments")
+    bio1, bio2, bio3, bio4, bio5 = st.columns(5)
+    with bio1:
+        sel_investigator = st.selectbox(
+            "Investigator",
+            _discovery_select_options(hub_ctx["investigator"]),
+            key="dh_bio_investigator",
+        )
+    with bio2:
+        sel_target = st.selectbox("Bait / Target", _discovery_select_options(hub_ctx["target"]), key="dh_bio_target")
+    with bio3:
+        sel_cell = st.selectbox("Cell Line", _discovery_select_options(hub_ctx["cell_line"]), key="dh_bio_cell")
+    with bio4:
+        sel_genetic = st.selectbox(
+            "Genetic background",
+            _discovery_select_options(hub_ctx["genetic_background"]),
+            key="dh_bio_genetic",
+        )
+    with bio5:
+        sel_treatment = st.selectbox(
+            "Treatment",
+            _discovery_select_options(hub_ctx["treatment"]),
+            key="dh_bio_treatment",
+        )
+    tech1, tech2, tech3, tech4, tech5 = st.columns(5)
+    with tech1:
+        sel_exp_type = st.selectbox(
+            "Experiment type",
+            _discovery_select_options(hub_ctx["experiment_type"]),
+            key="dh_tech_exptype",
+        )
+    with tech2:
+        sel_tag = st.selectbox(
+            "Purification tag",
+            _discovery_select_options(hub_ctx["purification_tag"]),
+            key="dh_tech_tag",
+        )
+    with tech3:
+        sel_conc = st.selectbox(
+            "Concentration method",
+            _discovery_select_options(hub_ctx["concentration_method"]),
+            key="dh_tech_conc",
+        )
+    with tech4:
+        sel_fix = st.selectbox(
+            "Fixation / crosslinking",
+            _discovery_select_options(hub_ctx["fixation_crosslinking"]),
+            key="dh_tech_fix",
+        )
+    with tech5:
+        sel_nuc = st.selectbox(
+            "Nuclease treatment",
+            _discovery_select_options(hub_ctx["nuclease_treatment"]),
+            key="dh_tech_nuc",
+        )
+    details_keyword = st.text_input(
+        "Keyword Search in Details",
+        value="",
+        key="dh_details_keyword",
+        placeholder="e.g. sonication settings, buffer notes",
+    ).strip()
+
+    _mask = pd.Series(True, index=hub_ctx.index)
+    if sel_investigator != "All":
+        _mask &= hub_ctx["investigator"].astype(str).str.strip() == sel_investigator
+    if sel_target != "All":
+        _mask &= hub_ctx["target"].astype(str).str.strip() == sel_target
+    if sel_cell != "All":
+        _mask &= hub_ctx["cell_line"].astype(str).str.strip() == sel_cell
+    if sel_genetic != "All":
+        _mask &= hub_ctx["genetic_background"].astype(str).str.strip() == sel_genetic
+    if sel_treatment != "All":
+        _mask &= hub_ctx["treatment"].astype(str).str.strip() == sel_treatment
+    if sel_exp_type != "All":
+        _mask &= hub_ctx["experiment_type"].astype(str).str.strip() == sel_exp_type
+    if sel_tag != "All":
+        _mask &= hub_ctx["purification_tag"].astype(str).str.strip() == sel_tag
+    if sel_conc != "All":
+        _mask &= hub_ctx["concentration_method"].astype(str).str.strip() == sel_conc
+    if sel_fix != "All":
+        _mask &= hub_ctx["fixation_crosslinking"].astype(str).str.strip() == sel_fix
+    if sel_nuc != "All":
+        _mask &= hub_ctx["nuclease_treatment"].astype(str).str.strip() == sel_nuc
+    hub_scan = hub_ctx.loc[_mask].copy()
+
+    bait_for_consensus = dp.resolve_search_as_bait(gene_query)
+
+    if bait_for_consensus is not None:
+        bait_runs = hub_meta[
+            hub_meta["target"].apply(lambda t: dp.manifest_row_matches_bait(str(t), bait_for_consensus))
+        ].copy()
+        st.markdown("### Primary target — enrichment profile")
+        if bait_for_consensus == "CEBPE":
+            st.caption(f"Indexed experiments where **CEBPE** is the IP bait (primary target outside the 26 BAF core).")
+        else:
+            st.caption(f"Indexed experiments where **{bait_for_consensus}** is the IP bait.")
+        if not bait_runs.empty:
+            enrich_cols = bait_runs[
+                ["investigator", "session_id", "cell_line", "sample_label", "details", "display_name", "full_filename"]
+            ].rename(
+                columns={
+                    "investigator": "Investigator",
+                    "session_id": "Exp ID",
+                    "cell_line": "Cell Line",
+                    "sample_label": "Sample Label",
+                    "details": "Details",
+                    "display_name": "Display Name",
+                    "full_filename": "Full Filename",
+                }
+            )
+            enrich_view = enrich_cols.sort_values("Exp ID")
+            if mode_is_tmt and "Exp ID" in enrich_view.columns:
+                enrich_view = enrich_view.drop(columns=["Exp ID"])
+            if not mode_is_tmt:
+                enrich_view = enrich_view.drop(columns=["Type", "Biological Condition"], errors="ignore")
+            st.dataframe(
+                enrich_view,
+                use_container_width=True,
+                column_config={
+                    "Details": st.column_config.TextColumn("Details", width="large", help="Specific experimental details")
+                },
+            )
+        else:
+            st.info(f"No runs indexed with bait target **{bait_for_consensus}**.")
+
+        st.markdown("### Primary target — consensus interactors")
+        st.caption(f"Mean spectral counts across {len(bait_runs)} run(s) with bait **{bait_for_consensus}**.")
+        if not bait_runs.empty:
+            all_rows = []
+            for _, row in bait_runs.iterrows():
+                e = load_experiment_summary(row["path"], tmt_sn_col_from_row(row)).copy()
+                e["exp_id"] = row["session_id"]
+                all_rows.append(e)
+            merged_c = pd.concat(all_rows, ignore_index=True)
+            prevalence = merged_c.groupby("Gene Symbol")["exp_id"].nunique()
+            thr = max(1, math.ceil(len(bait_runs) * 0.5))
+            keep = prevalence[prevalence >= thr].index
+            consensus = (
+                merged_c[merged_c["Gene Symbol"].isin(keep)]
+                .groupby("Gene Symbol", as_index=False)
+                .agg(Mean_Spectral_Count=("Spectral Count", "mean"), Mean_Unique_Peptides=("Unique Peptides", "mean"), Runs_Present=("exp_id", "nunique"))
+                .sort_values("Mean_Spectral_Count", ascending=False)
+            )
+            consensus["Prevalence Score (%)"] = (consensus["Runs_Present"] / len(bait_runs) * 100).round(1)
+            st.dataframe(consensus, use_container_width=True)
+        else:
+            st.info("No consensus table (no bait-matched runs).")
+
+    st.markdown("### Global Results")
+    rows = []
+    if hub_scan.empty:
+        st.warning("No experiments match the selected filters.")
+    else:
         prog = st.progress(0)
-        files = hub_meta.to_dict(orient="records")
+        files = hub_scan.to_dict(orient="records")
         for i, row in enumerate(files, start=1):
             e = load_experiment_summary(row["path"], tmt_sn_col_from_row(row))
             hit = dp.filter_rows_for_gene(e, gene_query)
@@ -802,102 +917,102 @@ if st.session_state["active_tab"] == "Discovery Hub":
             prog.progress(i / len(files))
         prog.empty()
 
-        if rows:
-            res_all = pd.DataFrame(rows).sort_values("Spectral Count", ascending=False)
-            if tech_search:
-                res = res_all[res_all["Details"].apply(lambda d: _details_match(d, tech_search))].copy()
-            else:
-                res = res_all.copy()
-            if res.empty and tech_search:
-                st.info("No experiments found matching those technical criteria.")
-                st.stop()
-            res_view = res.drop(columns=["Exp ID"], errors="ignore") if mode_is_tmt else res
-            if not mode_is_tmt:
-                res_view = res_view.drop(columns=["Type", "Biological Condition"], errors="ignore")
-            if compare_core:
-                try:
-                    st.dataframe(
-                        res_view.style.map(
-                            lambda v: f"background-color: {SOFT_BLUE}; color: {TEXT_DARK};" if v else "",
-                            subset=["Core BAF IP"],
-                        ),
-                        use_container_width=True,
-                    )
-                except Exception:
-                    st.dataframe(res_view, use_container_width=True)
-            else:
-                cols = ["Investigator", "Target", "Cell Line", "Spectral Count", "Unique Peptides", "Details"]
-                if not mode_is_tmt:
-                    cols.insert(3, "Exp ID")
-                st.dataframe(
-                    res_view[cols],
-                    use_container_width=True,
-                    column_config={
-                        "Details": st.column_config.TextColumn("Details", width="large", help="Specific experimental details")
-                    },
-                )
-
-            qf = st.selectbox("Quick Open experiment", options=res["File Name"].tolist())
-            if st.button("Open in Dataset Browser"):
-                st.session_state["selected_file"] = qf
-                st.session_state["quick_open_file"] = qf
-                st.session_state["active_tab"] = "Dataset Browser"
-                st.rerun()
-
-            inv_dist = res.groupby("Investigator", as_index=False)["Spectral Count"].count().rename(columns={"Spectral Count": "Hit Count"}).sort_values("Hit Count", ascending=False)
-            _cell_plot_src = res.copy()
-            _cell_plot_src["_upep_cell"] = dp.unique_peptides_numeric_series(_cell_plot_src)
-            cell_enrich = (
-                _cell_plot_src.groupby("Cell Line", as_index=False)
-                .agg(
-                    Unique_Peptides_total=("_upep_cell", "sum"),
-                    Investigator=(
-                        "Investigator",
-                        lambda s: ", ".join(
-                            sorted(
-                                {
-                                    str(x).strip()
-                                    for x in s.dropna().unique()
-                                    if str(x).strip() and str(x).strip().lower() not in ("nan", "none")
-                                }
-                            )
-                        )
-                        or "N/A",
-                    ),
-                )
-                .rename(columns={"Unique_Peptides_total": "Unique Peptides"})
-                .sort_values("Unique Peptides", ascending=False)
-            )
-            cell_enrich["Unique Peptides"] = pd.to_numeric(cell_enrich["Unique Peptides"], errors="coerce").fillna(0.0).round().astype(int)
-            g1, g2 = st.columns(2)
-            with g1:
-                fig1 = px.bar(inv_dist, x="Investigator", y="Hit Count", title="Enrichment by Investigator", color_discrete_sequence=[OCEAN_BLUE])
-                fig1.update_layout(plot_bgcolor=BG_WHITE, paper_bgcolor=BG_WHITE)
-                st.plotly_chart(fig1, use_container_width=True)
-            with g2:
-                fig2 = px.bar(
-                    cell_enrich,
-                    x="Cell Line",
-                    y="Unique Peptides",
-                    title="Enrichment by Cell Line",
-                    color_discrete_sequence=[EMERALD],
-                )
-                fig2.update_layout(
-                    plot_bgcolor=BG_WHITE,
-                    paper_bgcolor=BG_WHITE,
-                    yaxis_title="Unique Peptides",
-                )
-                fig2.update_traces(
-                    hovertemplate=(
-                        "<b>Cell Line:</b> %{x}<br>"
-                        "<b>Unique Peptides:</b> %{y}<br>"
-                        "<b>Investigator:</b> %{customdata[0]}<extra></extra>"
-                    ),
-                    customdata=cell_enrich[["Investigator"]].to_numpy(),
-                )
-                st.plotly_chart(fig2, use_container_width=True)
+    if rows:
+        res_all = pd.DataFrame(rows).sort_values("Spectral Count", ascending=False)
+        if details_keyword:
+            res = res_all[res_all["Details"].apply(lambda d: _details_match(d, details_keyword))].copy()
         else:
-            st.info("No hits found.")
+            res = res_all.copy()
+        if res.empty and details_keyword:
+            st.info("No experiments found matching those technical criteria.")
+            st.stop()
+        res_view = res.drop(columns=["Exp ID"], errors="ignore") if mode_is_tmt else res
+        if not mode_is_tmt:
+            res_view = res_view.drop(columns=["Type", "Biological Condition"], errors="ignore")
+        if compare_core:
+            try:
+                st.dataframe(
+                    res_view.style.map(
+                        lambda v: f"background-color: {SOFT_BLUE}; color: {TEXT_DARK};" if v else "",
+                        subset=["Core BAF IP"],
+                    ),
+                    use_container_width=True,
+                )
+            except Exception:
+                st.dataframe(res_view, use_container_width=True)
+        else:
+            cols = ["Investigator", "Target", "Cell Line", "Spectral Count", "Unique Peptides", "Details"]
+            if not mode_is_tmt:
+                cols.insert(3, "Exp ID")
+            st.dataframe(
+                res_view[cols],
+                use_container_width=True,
+                column_config={
+                    "Details": st.column_config.TextColumn("Details", width="large", help="Specific experimental details")
+                },
+            )
+
+        qf = st.selectbox("Quick Open experiment", options=res["File Name"].tolist())
+        if st.button("Open in Dataset Browser"):
+            st.session_state["selected_file"] = qf
+            st.session_state["quick_open_file"] = qf
+            st.session_state["active_tab"] = "Dataset Browser"
+            st.rerun()
+
+        inv_dist = res.groupby("Investigator", as_index=False)["Spectral Count"].count().rename(columns={"Spectral Count": "Hit Count"}).sort_values("Hit Count", ascending=False)
+        _cell_plot_src = res.copy()
+        _cell_plot_src["_upep_cell"] = dp.unique_peptides_numeric_series(_cell_plot_src)
+        cell_enrich = (
+            _cell_plot_src.groupby("Cell Line", as_index=False)
+            .agg(
+                Unique_Peptides_total=("_upep_cell", "sum"),
+                Investigator=(
+                    "Investigator",
+                    lambda s: ", ".join(
+                        sorted(
+                            {
+                                str(x).strip()
+                                for x in s.dropna().unique()
+                                if str(x).strip() and str(x).strip().lower() not in ("nan", "none")
+                            }
+                        )
+                    )
+                    or "N/A",
+                ),
+            )
+            .rename(columns={"Unique_Peptides_total": "Unique Peptides"})
+            .sort_values("Unique Peptides", ascending=False)
+        )
+        cell_enrich["Unique Peptides"] = pd.to_numeric(cell_enrich["Unique Peptides"], errors="coerce").fillna(0.0).round().astype(int)
+        g1, g2 = st.columns(2)
+        with g1:
+            fig1 = px.bar(inv_dist, x="Investigator", y="Hit Count", title="Enrichment by Investigator", color_discrete_sequence=[OCEAN_BLUE])
+            fig1.update_layout(plot_bgcolor=BG_WHITE, paper_bgcolor=BG_WHITE)
+            st.plotly_chart(fig1, use_container_width=True)
+        with g2:
+            fig2 = px.bar(
+                cell_enrich,
+                x="Cell Line",
+                y="Unique Peptides",
+                title="Enrichment by Cell Line",
+                color_discrete_sequence=[EMERALD],
+            )
+            fig2.update_layout(
+                plot_bgcolor=BG_WHITE,
+                paper_bgcolor=BG_WHITE,
+                yaxis_title="Unique Peptides",
+            )
+            fig2.update_traces(
+                hovertemplate=(
+                    "<b>Cell Line:</b> %{x}<br>"
+                    "<b>Unique Peptides:</b> %{y}<br>"
+                    "<b>Investigator:</b> %{customdata[0]}<extra></extra>"
+                ),
+                customdata=cell_enrich[["Investigator"]].to_numpy(),
+            )
+            st.plotly_chart(fig2, use_container_width=True)
+    elif not hub_scan.empty:
+        st.info("No hits found for this gene in the filtered experiments.")
 
 if st.session_state["active_tab"] == "Comparative Analysis":
     section_header("Comparative Analysis", EMERALD)

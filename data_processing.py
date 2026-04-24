@@ -941,3 +941,103 @@ def resolve_search_as_bait(gene_query: str) -> Optional[str]:
     if is_core_baf_canonical(can):
         return can
     return None
+
+
+def discovery_filter_tag_row(
+    details: Any,
+    sample_label: Any,
+    biological_condition: Any,
+) -> Dict[str, str]:
+    """
+    Best-effort categorical tags for Discovery Hub when manifest rows lack dedicated columns.
+    Scans Details, Sample Label, and Biological Condition text. Returns 'Not specified' when no hint matches.
+    """
+    blob_raw = " ".join(str(x or "") for x in (details, sample_label, biological_condition))
+    blob = " " + re.sub(r"\s+", " ", blob_raw).upper() + " "
+
+    genetic = "Not specified"
+    if re.search(r"\bKO\b", blob) or "KNOCKOUT" in blob or "KNOCK-OUT" in blob or "NULL ALLELE" in blob:
+        genetic = "Knockout"
+    elif "SHRNA" in blob or re.search(r"\bKD\b", blob) or "KNOCKDOWN" in blob or "KNOCK-DOWN" in blob:
+        genetic = "Knockdown / shRNA"
+    elif "CRISPR" in blob:
+        genetic = "CRISPR edited"
+    elif re.search(r"\bWT\b", blob) or "WILD-TYPE" in blob or "WILD TYPE" in blob:
+        genetic = "Wild-type"
+
+    treatment = "Not specified"
+    if re.search(r"\bDOX\b", blob) or "DOXYCYCLINE" in blob:
+        treatment = "Doxycycline / Tet system"
+    elif re.search(r"\bTAM\b", blob) or "TAMOXIFEN" in blob:
+        treatment = "Tamoxifen / ER fusion"
+    elif re.search(r"\bDEX\b", blob) or "DEXAMETHASONE" in blob:
+        treatment = "Dexamethasone"
+    elif "VEHICLE" in blob and re.search(r"\bDMSO\b", blob):
+        treatment = "Vehicle (DMSO)"
+    elif any(k in blob for k in (" INHIBITOR", " INHIB", "AGONIST", "ANTAGONIST", "COMPOUND", "DRUG")):
+        treatment = "Drug / compound (see Details)"
+
+    purification = "Not specified"
+    if "STREPTAVIDIN" in blob or "STREP-TACTIN" in blob:
+        purification = "Streptavidin / Strep-Tactin"
+    elif re.search(r"\bFLAG\b", blob) or "FLAG-M2" in blob or "ANTI-FLAG" in blob:
+        purification = "FLAG"
+    elif re.search(r"\bHA\b", blob) or "ANTI-HA" in blob:
+        purification = "HA"
+    elif re.search(r"\bMYC\b", blob) or "ANTI-MYC" in blob:
+        purification = "Myc"
+    elif "HIS-TAG" in blob or "6XHIS" in blob or "6-HIS" in blob or re.search(r"\bHIS\b", blob):
+        purification = "His-tag"
+    elif "GST" in blob:
+        purification = "GST"
+    elif "V5" in blob:
+        purification = "V5"
+    elif re.search(r"\bTAP\b", blob) or "TANDEM AFFINITY" in blob:
+        purification = "TAP"
+    elif "BIOTIN" in blob:
+        purification = "Biotin"
+
+    concentration = "Not specified"
+    if (
+        "AMMONIUM SULFATE" in blob
+        or "AMMONIUM SULPHATE" in blob
+        or "NH4SO4" in blob
+        or "(NH4)2SO4" in blob
+        or "AMSULF" in blob
+    ):
+        concentration = "Ammonium sulfate precipitation"
+    elif "TCA" in blob or "TRICHLOROACETIC" in blob:
+        concentration = "TCA precipitation"
+    elif "ACETONE" in blob and "PRECIP" in blob:
+        concentration = "Acetone precipitation"
+    elif "CHLOROFORM" in blob or "METH-CHLOR" in blob:
+        concentration = "Organic extraction / phase separation"
+    elif "SPIN COLUMN" in blob or "CONCENTRAT" in blob:
+        concentration = "Spin column / concentrator"
+
+    fixation = "Not specified"
+    if "DSP" in blob or "DSS" in blob or "CROSSLINK" in blob or re.search(r"\bXL\b", blob) or "CROSS-LINK" in blob:
+        fixation = "Chemical crosslinking"
+    elif "FORMALDEHYDE" in blob or " PFA " in blob or "PARAFORMALDEHYDE" in blob:
+        fixation = "Formaldehyde / PFA fixation"
+    elif "GLUTARALDEHYDE" in blob:
+        fixation = "Glutaraldehyde fixation"
+
+    nuclease = "Not specified"
+    if "BENZONASE" in blob:
+        nuclease = "Benzonase"
+    elif "MNASE" in blob or "MICROCOCCAL" in blob:
+        nuclease = "MNase / micrococcal nuclease"
+    elif "DNASE" in blob:
+        nuclease = "DNase"
+    elif "RNASE" in blob:
+        nuclease = "RNase"
+
+    return {
+        "genetic_background": genetic,
+        "treatment": treatment,
+        "purification_tag": purification,
+        "concentration_method": concentration,
+        "fixation_crosslinking": fixation,
+        "nuclease_treatment": nuclease,
+    }
