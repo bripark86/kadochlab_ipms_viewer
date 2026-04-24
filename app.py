@@ -13,13 +13,15 @@ import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
+from streamlit_gsheets import GSheetsConnection
 
 import data_processing as dp
 
 st.set_page_config(page_title="IPMS Viewer", layout="wide")
 
+conn = st.connection("gsheets", type=GSheetsConnection)
+
 DATA_ROOT = Path("Data")
-FEEDBACK_LOG_PATH = DATA_ROOT / "app_feedback.txt"
 OVERRIDES_PATH = Path("metadata_overrides.json")
 
 
@@ -1383,13 +1385,23 @@ if st.session_state["active_tab"] == "Feedback":
         if not suggestion or not str(suggestion).strip():
             st.warning("Please enter a suggestion before submitting.")
         else:
-            DATA_ROOT.mkdir(parents=True, exist_ok=True)
             ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             name_part = str(name).strip() if str(name).strip() else "Anonymous"
-            line = f"[{ts}] {category} - {name_part}: {str(suggestion).strip()}\n"
-            with open(FEEDBACK_LOG_PATH, "a", encoding="utf-8") as fb:
-                fb.write(line)
-            st.success("Thank you! Your feedback has been recorded.")
+            sug = str(suggestion).strip()
+            _fb_cols = ["Timestamp", "Name", "Category", "Suggestion"]
+            try:
+                existing_data = conn.read(worksheet="Sheet1", usecols=[0, 1, 2, 3], ttl=0)
+                if existing_data is None or existing_data.empty or existing_data.shape[1] < 4:
+                    existing_data = pd.DataFrame(columns=_fb_cols)
+                else:
+                    existing_data = existing_data.iloc[:, :4].copy()
+                    existing_data.columns = _fb_cols
+                new_row_df = pd.DataFrame([[ts, name_part, category, sug]], columns=_fb_cols)
+                updated_df = pd.concat([existing_data, new_row_df], ignore_index=True)
+                conn.update(worksheet="Sheet1", data=updated_df)
+                st.success("Feedback sent directly to Google Sheets!")
+            except Exception:
+                st.warning("Could not connect to Google Sheets. Please check back later!")
 
 if st.session_state["active_tab"] == "Admin Control":
     section_header("Admin Control", OCEAN_BLUE)
