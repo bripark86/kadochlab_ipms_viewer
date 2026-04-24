@@ -387,9 +387,16 @@ def rank_abundance_hockey_stick_figure(
     # Leader lines: top 5 overall + every BAF (pixel offsets ax, ay from point to label text)
     label_ix = set(work.head(min(5, len(work))).index.tolist())
     label_ix.update(work.index[work["is_baf"]].tolist())
-    label_rows = work.loc[sorted(label_ix)].drop_duplicates(subset=["Rank"], keep="first").sort_values("Rank")
+    label_rows = (
+        work.loc[sorted(label_ix)]
+        .drop_duplicates(subset=["Rank"], keep="first")
+        .sort_values("Rank")
+        .copy()
+    )
+    label_rows["Gene Symbol"] = label_rows["Gene Symbol"].fillna("")
 
     baf_part = label_rows[label_rows["is_baf"]].copy()
+    baf_part = baf_part[np.isfinite(baf_part["x_plot"].astype(float)) & np.isfinite(baf_part["y_plot"].astype(float))]
     baf_offsets: Dict[int, Tuple[int, int]] = {}
     if not baf_part.empty:
         cx = float(baf_part["x_plot"].astype(float).mean())
@@ -429,14 +436,32 @@ def rank_abundance_hockey_stick_figure(
             ax_p, ay_p = baf_offsets.get(rk, (-50, -60))
         else:
             ax_p, ay_p = _non_baf_offsets(rk)
+        raw_rank = float(rk)
+        raw_abundance = float(pd.to_numeric(r["Spectral Count"], errors="coerce"))
+        if not np.isfinite(raw_rank) or not np.isfinite(raw_abundance):
+            continue
+        if raw_rank <= 0 or raw_abundance <= 0:
+            continue
+        x_val = float(np.log10(raw_rank))
+        if use_log10:
+            y_val = float(np.log10(raw_abundance + 1.0))
+        else:
+            y_val = float(raw_abundance)
+        if not np.isfinite(x_val) or not np.isfinite(y_val):
+            continue
+        if use_log10 and (x_val <= 0 or y_val <= 0):
+            continue
+        gene_txt = str(r["Gene Symbol"]).strip()
+        if not gene_txt:
+            continue
         fig.add_annotation(
             xref="x",
             yref="y",
-            x=float(r["x_plot"]),
-            y=float(r["y_plot"]),
-            ax=ax_p,
-            ay=ay_p,
-            text=str(r["Gene Symbol"]),
+            x=x_val,
+            y=y_val,
+            ax=float(ax_p),
+            ay=float(ay_p),
+            text=gene_txt,
             showarrow=True,
             arrowhead=0,
             arrowwidth=0.5,
