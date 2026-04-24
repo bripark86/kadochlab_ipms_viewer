@@ -814,68 +814,25 @@ if st.session_state["active_tab"] == "Discovery Hub":
 
     bait_for_consensus = dp.resolve_search_as_bait(gene_query)
 
-    if bait_for_consensus is not None:
-        bait_runs = hub_meta[
-            hub_meta["target"].apply(lambda t: dp.manifest_row_matches_bait(str(t), bait_for_consensus))
-        ].copy()
-        st.markdown("### Primary target — enrichment profile")
-        if bait_for_consensus == "CEBPE":
-            st.caption(f"Indexed experiments where **CEBPE** is the IP bait (primary target outside the 26 BAF core).")
-        else:
-            st.caption(f"Indexed experiments where **{bait_for_consensus}** is the IP bait.")
-        if not bait_runs.empty:
-            enrich_cols = bait_runs[
-                ["investigator", "session_id", "cell_line", "sample_label", "details", "display_name", "full_filename"]
-            ].rename(
-                columns={
-                    "investigator": "Investigator",
-                    "session_id": "Exp ID",
-                    "cell_line": "Cell Line",
-                    "sample_label": "Sample Label",
-                    "details": "Details",
-                    "display_name": "Display Name",
-                    "full_filename": "Full Filename",
-                }
-            )
-            enrich_view = enrich_cols.sort_values("Exp ID")
-            if mode_is_tmt and "Exp ID" in enrich_view.columns:
-                enrich_view = enrich_view.drop(columns=["Exp ID"])
-            if not mode_is_tmt:
-                enrich_view = enrich_view.drop(columns=["Type", "Biological Condition"], errors="ignore")
-            st.dataframe(
-                enrich_view,
-                use_container_width=True,
-                column_config={
-                    "Details": st.column_config.TextColumn("Details", width="large", help="Specific experimental details")
-                },
-            )
-        else:
-            st.info(f"No runs indexed with bait target **{bait_for_consensus}**.")
+    def _manifest_row_is_primary_bait(manifest_row: Dict[str, Any], gq: str) -> bool:
+        """True when this run's indexed bait matches the gene query (symbol or BAF alias, e.g. BRG1 vs SMARCA4)."""
+        q = (gq or "").strip().upper()
+        if not q:
+            return False
+        tgt = str(manifest_row.get("target", "")).strip()
+        if not tgt:
+            return False
+        if tgt.upper() == q:
+            return True
+        if q == "CEBPE" and tgt.upper() == "CEBPE":
+            return True
+        q_can = dp.identify_baf_target(q)
+        t_can = dp.identify_baf_target(tgt)
+        return bool(q_can and t_can and q_can == t_can)
 
-        st.markdown("### Primary target — consensus interactors")
-        st.caption(f"Mean spectral counts across {len(bait_runs)} run(s) with bait **{bait_for_consensus}**.")
-        if not bait_runs.empty:
-            all_rows = []
-            for _, row in bait_runs.iterrows():
-                e = load_experiment_summary(row["path"], tmt_sn_col_from_row(row)).copy()
-                e["exp_id"] = row["session_id"]
-                all_rows.append(e)
-            merged_c = pd.concat(all_rows, ignore_index=True)
-            prevalence = merged_c.groupby("Gene Symbol")["exp_id"].nunique()
-            thr = max(1, math.ceil(len(bait_runs) * 0.5))
-            keep = prevalence[prevalence >= thr].index
-            consensus = (
-                merged_c[merged_c["Gene Symbol"].isin(keep)]
-                .groupby("Gene Symbol", as_index=False)
-                .agg(Mean_Spectral_Count=("Spectral Count", "mean"), Mean_Unique_Peptides=("Unique Peptides", "mean"), Runs_Present=("exp_id", "nunique"))
-                .sort_values("Mean_Spectral_Count", ascending=False)
-            )
-            consensus["Prevalence Score (%)"] = (consensus["Runs_Present"] / len(bait_runs) * 100).round(1)
-            st.dataframe(consensus, use_container_width=True)
-        else:
-            st.info("No consensus table (no bait-matched runs).")
-
-    st.markdown("### Global Results")
+    st.divider()
+    st.markdown("### Global overview")
+    st.caption("Runs matching your gene search after filters. Rows highlighted in amber: this run’s indexed bait matches the gene you typed.")
     rows = []
     if hub_scan.empty:
         st.warning("No experiments match the selected filters.")
@@ -902,6 +859,7 @@ if st.session_state["active_tab"] == "Discovery Hub":
                         ),
                         "Details": str(row.get("details", "N/A")),
                         "File Name": row["file_name"],
+                        "_is_primary_bait": _manifest_row_is_primary_bait(row, gene_query),
                     }
                 )
             elif meta_hit:
@@ -919,6 +877,7 @@ if st.session_state["active_tab"] == "Discovery Hub":
                         ),
                         "Details": str(row.get("details", "N/A")),
                         "File Name": row["file_name"],
+                        "_is_primary_bait": _manifest_row_is_primary_bait(row, gene_query),
                     }
                 )
             prog.progress(i / len(files))
@@ -933,31 +892,52 @@ if st.session_state["active_tab"] == "Discovery Hub":
         if res.empty and details_keyword:
             st.info("No experiments found matching those technical criteria.")
             st.stop()
-        res_view = res.drop(columns=["Exp ID"], errors="ignore") if mode_is_tmt else res
+        st.markdown("#### Global results")
+        res_view = res.drop(columns=["_is_primary_bait"], errors="ignore")
+        if mode_is_tmt:
+            res_view = res_view.drop(columns=["Exp ID"], errors="ignore")
         if not mode_is_tmt:
             res_view = res_view.drop(columns=["Type", "Biological Condition"], errors="ignore")
-        if compare_core:
-            try:
-                st.dataframe(
-                    res_view.style.map(
-                        lambda v: f"background-color: {SOFT_BLUE}; color: {TEXT_DARK};" if v else "",
-                        subset=["Core BAF IP"],
-                    ),
-                    use_container_width=True,
+        _disp_cols = ["Investigator", "Target", "Cell Line", "Spectral Count", "Unique Peptides", "Details"]
+        if not mode_is_tmt:
+            _disp_cols.insert(3, "Exp ID")
+        if compare_core and "Core BAF IP" in res_view.columns:
+            _disp_cols.append("Core BAF IP")
+        res_disp = res_view[[c for c in _disp_cols if c in res_view.columns]].copy()
+        res_disp["Spectral Count"] = pd.to_numeric(res_disp["Spectral Count"], errors="coerce").fillna(0.0).round().astype(np.int64)
+        res_disp["Unique Peptides"] = pd.to_numeric(res_disp["Unique Peptides"], errors="coerce").fillna(0).round().astype(np.int64)
+        _bait_mask = res["_is_primary_bait"].reindex(res_disp.index).fillna(False)
+
+        def _row_highlight_primary_bait(row: pd.Series) -> List[str]:
+            if bool(_bait_mask.loc[row.name]):
+                return ["background-color: #fff3cd; color: #1f2937;"] * len(row)
+            return [""] * len(row)
+
+        _global_height = min(560, 52 + 38 * max(1, len(res_disp)))
+        _global_col_cfg: Dict[str, Any] = {
+            "Spectral Count": st.column_config.NumberColumn(
+                "Spectral Count",
+                help="Summed intensity (TMT) or spectral-derived count (CSV).",
+                format="%d",
+                width="medium",
+            ),
+            "Unique Peptides": st.column_config.NumberColumn(
+                "Unique Peptides",
+                format="%d",
+                width="small",
+            ),
+            "Details": st.column_config.TextColumn("Details", width="large", help="Experiment notes (from manifest / overrides)."),
+        }
+        try:
+            _styled = res_disp.style.apply(_row_highlight_primary_bait, axis=1)
+            if compare_core and "Core BAF IP" in res_disp.columns:
+                _styled = _styled.map(
+                    lambda v: f"background-color: {SOFT_BLUE}; color: {TEXT_DARK};" if v else "",
+                    subset=["Core BAF IP"],
                 )
-            except Exception:
-                st.dataframe(res_view, use_container_width=True)
-        else:
-            cols = ["Investigator", "Target", "Cell Line", "Spectral Count", "Unique Peptides", "Details"]
-            if not mode_is_tmt:
-                cols.insert(3, "Exp ID")
-            st.dataframe(
-                res_view[cols],
-                use_container_width=True,
-                column_config={
-                    "Details": st.column_config.TextColumn("Details", width="large", help="Specific experimental details")
-                },
-            )
+            st.dataframe(_styled, use_container_width=True, height=_global_height, column_config=_global_col_cfg)
+        except Exception:
+            st.dataframe(res_disp, use_container_width=True, height=_global_height, column_config=_global_col_cfg)
 
         qf = st.selectbox("Quick Open experiment", options=res["File Name"].tolist())
         if st.button("Open in Dataset Browser"):
@@ -991,6 +971,7 @@ if st.session_state["active_tab"] == "Discovery Hub":
             .sort_values("Unique Peptides", ascending=False)
         )
         cell_enrich["Unique Peptides"] = pd.to_numeric(cell_enrich["Unique Peptides"], errors="coerce").fillna(0.0).round().astype(int)
+        st.markdown("#### Enrichment across filtered runs")
         g1, g2 = st.columns(2)
         with g1:
             fig1 = px.bar(inv_dist, x="Investigator", y="Hit Count", title="Enrichment by Investigator", color_discrete_sequence=[OCEAN_BLUE])
@@ -1020,6 +1001,75 @@ if st.session_state["active_tab"] == "Discovery Hub":
             st.plotly_chart(fig2, use_container_width=True)
     elif not hub_scan.empty:
         st.info("No hits found for this gene in the filtered experiments.")
+
+    st.divider()
+    st.header("\U0001F3AF Consensus analysis")
+    if bait_for_consensus is not None:
+        bait_runs = hub_meta[
+            hub_meta["target"].apply(lambda t: dp.manifest_row_matches_bait(str(t), bait_for_consensus))
+        ].copy()
+        st.markdown("#### Indexed runs for this bait")
+        if bait_for_consensus == "CEBPE":
+            st.caption(f"Experiments indexed with **CEBPE** as the IP bait (outside the 26-gene BAF core list).")
+        else:
+            st.caption(f"Experiments indexed with **{bait_for_consensus}** (or an accepted alias) as the IP bait.")
+        if not bait_runs.empty:
+            enrich_cols = bait_runs[
+                ["investigator", "session_id", "cell_line", "sample_label", "details", "display_name", "full_filename"]
+            ].rename(
+                columns={
+                    "investigator": "Investigator",
+                    "session_id": "Exp ID",
+                    "cell_line": "Cell Line",
+                    "sample_label": "Sample Label",
+                    "details": "Details",
+                    "display_name": "Display Name",
+                    "full_filename": "Full Filename",
+                }
+            )
+            enrich_view = enrich_cols.sort_values("Exp ID")
+            if mode_is_tmt and "Exp ID" in enrich_view.columns:
+                enrich_view = enrich_view.drop(columns=["Exp ID"])
+            if not mode_is_tmt:
+                enrich_view = enrich_view.drop(columns=["Type", "Biological Condition"], errors="ignore")
+            st.dataframe(
+                enrich_view,
+                use_container_width=True,
+                height=min(420, 48 + 34 * max(1, len(enrich_view))),
+                column_config={
+                    "Details": st.column_config.TextColumn("Details", width="large", help="Specific experimental details")
+                },
+            )
+            with st.expander("\U0001F50D View consensus interactor table", expanded=False):
+                st.caption(
+                    f"Proteins meeting prevalence across **{len(bait_runs)}** indexed run(s) with bait **{bait_for_consensus}** "
+                    "(≥50% of runs). Opens here so global catalog stays separate from bait-specific discovery."
+                )
+                all_rows_c = []
+                for _, row in bait_runs.iterrows():
+                    e = load_experiment_summary(row["path"], tmt_sn_col_from_row(row)).copy()
+                    e["exp_id"] = row["session_id"]
+                    all_rows_c.append(e)
+                merged_c = pd.concat(all_rows_c, ignore_index=True)
+                prevalence = merged_c.groupby("Gene Symbol")["exp_id"].nunique()
+                thr = max(1, math.ceil(len(bait_runs) * 0.5))
+                keep = prevalence[prevalence >= thr].index
+                consensus = (
+                    merged_c[merged_c["Gene Symbol"].isin(keep)]
+                    .groupby("Gene Symbol", as_index=False)
+                    .agg(
+                        Mean_Spectral_Count=("Spectral Count", "mean"),
+                        Mean_Unique_Peptides=("Unique Peptides", "mean"),
+                        Runs_Present=("exp_id", "nunique"),
+                    )
+                    .sort_values("Mean_Spectral_Count", ascending=False)
+                )
+                consensus["Prevalence Score (%)"] = (consensus["Runs_Present"] / len(bait_runs) * 100).round(1)
+                st.dataframe(consensus, use_container_width=True)
+        else:
+            st.info(f"No runs indexed with bait target **{bait_for_consensus}**.")
+    else:
+        st.caption("Search a **core BAF** bait symbol (or **CEBPE**) to show bait-indexed runs and a consensus interactor table.")
 
 if st.session_state["active_tab"] == "Comparative Analysis":
     section_header("Comparative Analysis", EMERALD)
