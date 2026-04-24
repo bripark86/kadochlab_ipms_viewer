@@ -21,6 +21,12 @@ DATA_ROOT = Path("Data")
 OVERRIDES_PATH = Path("metadata_overrides.json")
 
 
+def ensure_metadata_overrides_file() -> None:
+    """Create an empty overrides file if missing so the app and Git can track it."""
+    if not OVERRIDES_PATH.exists():
+        OVERRIDES_PATH.write_text("{}\n", encoding="utf-8")
+
+
 def get_file_binary(
     file_path: Optional[str] = None,
     investigator_folder: Optional[str] = None,
@@ -71,6 +77,11 @@ def load_metadata_overrides() -> Dict[str, Dict[str, str]]:
 
 def save_metadata_overrides(overrides: Dict[str, Dict[str, str]]) -> None:
     OVERRIDES_PATH.write_text(json.dumps(overrides, indent=2, sort_keys=True), encoding="utf-8")
+
+
+ensure_metadata_overrides_file()
+# Eager read at startup: same JSON drives enrich_manifest (overrides beat filename parsing).
+load_metadata_overrides()
 
 
 BAF_RED = "#FF4B4B"
@@ -153,7 +164,11 @@ def get_path_metadata(path: str) -> dict:
 
 
 def enrich_manifest(df: pd.DataFrame) -> pd.DataFrame:
-    """Attach extract_metadata columns to manifest rows (lazy). TMT rows are already complete."""
+    """
+    Attach filename-derived metadata, then apply ``metadata_overrides.json`` on top.
+
+    Priority: manual overrides (gold) win over automatic filename parsing (fallback).
+    """
     if df.empty:
         return df
     overrides = load_metadata_overrides()
@@ -164,38 +179,55 @@ def enrich_manifest(df: pd.DataFrame) -> pd.DataFrame:
         inv_from_folder = pth.parent.name or str(rd.get("investigator", "") or "")
         sn = rd.get("tmt_sn_sum_column")
         if sn is not None and str(sn).strip() != "" and (not isinstance(sn, float) or not pd.isna(sn)):
-            # Keep TMT manifest investigator display name (e.g., "Kevin So"), already path-derived.
+            key = str(rd.get("full_filename") or pth.name)
+            ov = overrides.get(key, {})
             rd = {**rd, "investigator": str(rd.get("investigator") or inv_from_folder)}
             rd.setdefault("experiment_type", "TMT Multiplex")
             if not rd.get("biological_condition"):
                 rd["biological_condition"] = dp.tmt_biological_condition_from_channel_label(str(rd.get("tmt_channel", "")))
             rd.setdefault("details", "N/A")
             rd.setdefault("display_name", str(rd.get("file_name", "")))
+            disp_o = str(ov.get("display_name", "")).strip()
+            det_o = str(ov.get("details", "")).strip()
+            if disp_o:
+                if str(rd.get("tmt_channel", "")).strip():
+                    rd["display_name"] = f"{disp_o} | Channel: {rd.get('tmt_channel')}"
+                else:
+                    rd["display_name"] = disp_o
+            if det_o:
+                rd["details"] = det_o
+            if not str(rd.get("details", "")).strip():
+                rd["details"] = "N/A"
+            if not str(rd.get("display_name", "")).strip():
+                rd["display_name"] = str(rd.get("file_name", ""))
             out_rows.append(rd)
             continue
         m = get_path_metadata(str(row["path"]))
         m["investigator"] = inv_from_folder
         m["biological_condition"] = "Single Run"
-        out_rows.append({**rd, **m, "experiment_type": "Label-Free", "details": "Single Run", "display_name": str(rd.get("file_name", ""))})
+        key = str(m.get("full_filename") or pth.name)
+        ov = overrides.get(key, {})
+        base: Dict[str, Any] = {
+            **rd,
+            **m,
+            "experiment_type": "Label-Free",
+            "details": "Single Run",
+            "display_name": str(rd.get("file_name", "")),
+        }
+        disp_o = str(ov.get("display_name", "")).strip()
+        det_o = str(ov.get("details", "")).strip()
+        if disp_o:
+            base["display_name"] = disp_o
+        if det_o:
+            base["details"] = det_o
+        if not str(base.get("details", "")).strip():
+            base["details"] = "N/A"
+        if not str(base.get("display_name", "")).strip():
+            base["display_name"] = str(rd.get("file_name", ""))
+        out_rows.append(base)
     out_df = pd.DataFrame(out_rows)
     if out_df.empty:
         return out_df
-    for i, r in out_df.iterrows():
-        key = str(r.get("full_filename") or Path(str(r.get("path", ""))).name)
-        ov = overrides.get(key, {})
-        disp = str(ov.get("display_name", "")).strip()
-        det = str(ov.get("details", "")).strip()
-        if disp:
-            if str(r.get("tmt_channel", "")).strip():
-                out_df.at[i, "display_name"] = f"{disp} | Channel: {r.get('tmt_channel')}"
-            else:
-                out_df.at[i, "display_name"] = disp
-        if det:
-            out_df.at[i, "details"] = det
-        if not str(out_df.at[i, "details"]).strip():
-            out_df.at[i, "details"] = "N/A"
-        if not str(out_df.at[i, "display_name"]).strip():
-            out_df.at[i, "display_name"] = str(r.get("file_name", ""))
     return dp.apply_manifest_discovery_defaults(out_df)
 
 
@@ -1216,7 +1248,12 @@ if st.session_state["active_tab"] == "Admin Control":
             index_library.clear()
             get_path_metadata.clear()
             load_experiment_summary.clear()
-            st.success(f"Saved overrides for {key}")
+            st.success(f"Saved overrides for {key} (session and local {OVERRIDES_PATH.name}).")
+            st.info(
+                "Copy the code below and paste it into your metadata_overrides.json file on GitHub "
+                "to make these changes permanent for everyone who pulls the repo."
+            )
+            st.code(json.dumps(overrides, indent=2, sort_keys=True), language="json")
 
 with st.sidebar:
     with st.expander("QC Summary", expanded=True):
