@@ -901,6 +901,40 @@ def is_primary_target_bait(name: Optional[str]) -> bool:
     return name in BAF_CORE_CANONICAL
 
 
+def apply_manifest_discovery_defaults(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Ensure manifest rows have string placeholders for Discovery Hub filters / display.
+    Called after filename parsing and overrides merge so missing columns never break the UI.
+    """
+    if df.empty:
+        return df
+    defaults: Dict[str, str] = {
+        "investigator": "Unknown",
+        "target": "Unknown",
+        "cell_line": "Unknown",
+        "sample_label": "N/A",
+        "details": "N/A",
+        "biological_condition": "N/A",
+        "experiment_type": "Unknown",
+        "display_name": "N/A",
+        "full_filename": "N/A",
+        "file_name": "N/A",
+        "session_id": "Unknown",
+        "initials": "Unknown",
+    }
+    out = df.copy()
+    for col, default in defaults.items():
+        if col not in out.columns:
+            out[col] = default
+            continue
+        ser = out[col].astype(object)
+        strv = ser.astype(str).str.strip()
+        bad = ser.isna() | strv.eq("") | strv.str.lower().isin(["nan", "none", "<na>"])
+        out.loc[bad, col] = default
+        out[col] = out[col].fillna(default)
+    return out
+
+
 def hub_manifest_row_matches_global_query(row: Dict[str, Any], query: str) -> bool:
     """
     True if query appears in manifest metadata (cell line, target, TMT channel, filenames, etc.).
@@ -943,6 +977,21 @@ def resolve_search_as_bait(gene_query: str) -> Optional[str]:
     return None
 
 
+DISCOVERY_TAG_KEYS: Tuple[str, ...] = (
+    "genetic_background",
+    "treatment",
+    "purification_tag",
+    "concentration_method",
+    "fixation_crosslinking",
+    "nuclease_treatment",
+)
+
+
+def discovery_filter_tag_defaults_unknown() -> Dict[str, str]:
+    """Fallback tag row when parsing fails or metadata is incomplete."""
+    return {k: "Unknown" for k in DISCOVERY_TAG_KEYS}
+
+
 def discovery_filter_tag_row(
     details: Any,
     sample_label: Any,
@@ -951,93 +1000,119 @@ def discovery_filter_tag_row(
     """
     Best-effort categorical tags for Discovery Hub when manifest rows lack dedicated columns.
     Scans Details, Sample Label, and Biological Condition text. Returns 'Not specified' when no hint matches.
+    On any error, returns all 'Unknown' (never raises).
     """
-    blob_raw = " ".join(str(x or "") for x in (details, sample_label, biological_condition))
-    blob = " " + re.sub(r"\s+", " ", blob_raw).upper() + " "
+    try:
+        blob_raw = " ".join(str(x or "") for x in (details, sample_label, biological_condition))
+        blob = " " + re.sub(r"\s+", " ", blob_raw).upper() + " "
 
-    genetic = "Not specified"
-    if re.search(r"\bKO\b", blob) or "KNOCKOUT" in blob or "KNOCK-OUT" in blob or "NULL ALLELE" in blob:
-        genetic = "Knockout"
-    elif "SHRNA" in blob or re.search(r"\bKD\b", blob) or "KNOCKDOWN" in blob or "KNOCK-DOWN" in blob:
-        genetic = "Knockdown / shRNA"
-    elif "CRISPR" in blob:
-        genetic = "CRISPR edited"
-    elif re.search(r"\bWT\b", blob) or "WILD-TYPE" in blob or "WILD TYPE" in blob:
-        genetic = "Wild-type"
+        genetic = "Not specified"
+        if re.search(r"\bKO\b", blob) or "KNOCKOUT" in blob or "KNOCK-OUT" in blob or "NULL ALLELE" in blob:
+            genetic = "Knockout"
+        elif "SHRNA" in blob or re.search(r"\bKD\b", blob) or "KNOCKDOWN" in blob or "KNOCK-DOWN" in blob:
+            genetic = "Knockdown / shRNA"
+        elif "CRISPR" in blob:
+            genetic = "CRISPR edited"
+        elif re.search(r"\bWT\b", blob) or "WILD-TYPE" in blob or "WILD TYPE" in blob:
+            genetic = "Wild-type"
 
-    treatment = "Not specified"
-    if re.search(r"\bDOX\b", blob) or "DOXYCYCLINE" in blob:
-        treatment = "Doxycycline / Tet system"
-    elif re.search(r"\bTAM\b", blob) or "TAMOXIFEN" in blob:
-        treatment = "Tamoxifen / ER fusion"
-    elif re.search(r"\bDEX\b", blob) or "DEXAMETHASONE" in blob:
-        treatment = "Dexamethasone"
-    elif "VEHICLE" in blob and re.search(r"\bDMSO\b", blob):
-        treatment = "Vehicle (DMSO)"
-    elif any(k in blob for k in (" INHIBITOR", " INHIB", "AGONIST", "ANTAGONIST", "COMPOUND", "DRUG")):
-        treatment = "Drug / compound (see Details)"
+        treatment = "Not specified"
+        if re.search(r"\bDOX\b", blob) or "DOXYCYCLINE" in blob:
+            treatment = "Doxycycline / Tet system"
+        elif re.search(r"\bTAM\b", blob) or "TAMOXIFEN" in blob:
+            treatment = "Tamoxifen / ER fusion"
+        elif re.search(r"\bDEX\b", blob) or "DEXAMETHASONE" in blob:
+            treatment = "Dexamethasone"
+        elif "VEHICLE" in blob and re.search(r"\bDMSO\b", blob):
+            treatment = "Vehicle (DMSO)"
+        elif any(k in blob for k in (" INHIBITOR", " INHIB", "AGONIST", "ANTAGONIST", "COMPOUND", "DRUG")):
+            treatment = "Drug / compound (see Details)"
 
-    purification = "Not specified"
-    if "STREPTAVIDIN" in blob or "STREP-TACTIN" in blob:
-        purification = "Streptavidin / Strep-Tactin"
-    elif re.search(r"\bFLAG\b", blob) or "FLAG-M2" in blob or "ANTI-FLAG" in blob:
-        purification = "FLAG"
-    elif re.search(r"\bHA\b", blob) or "ANTI-HA" in blob:
-        purification = "HA"
-    elif re.search(r"\bMYC\b", blob) or "ANTI-MYC" in blob:
-        purification = "Myc"
-    elif "HIS-TAG" in blob or "6XHIS" in blob or "6-HIS" in blob or re.search(r"\bHIS\b", blob):
-        purification = "His-tag"
-    elif "GST" in blob:
-        purification = "GST"
-    elif "V5" in blob:
-        purification = "V5"
-    elif re.search(r"\bTAP\b", blob) or "TANDEM AFFINITY" in blob:
-        purification = "TAP"
-    elif "BIOTIN" in blob:
-        purification = "Biotin"
+        purification = "Not specified"
+        if "STREPTAVIDIN" in blob or "STREP-TACTIN" in blob:
+            purification = "Streptavidin / Strep-Tactin"
+        elif re.search(r"\bFLAG\b", blob) or "FLAG-M2" in blob or "ANTI-FLAG" in blob:
+            purification = "FLAG"
+        elif re.search(r"\bHA\b", blob) or "ANTI-HA" in blob:
+            purification = "HA"
+        elif re.search(r"\bMYC\b", blob) or "ANTI-MYC" in blob:
+            purification = "Myc"
+        elif "HIS-TAG" in blob or "6XHIS" in blob or "6-HIS" in blob or re.search(r"\bHIS\b", blob):
+            purification = "His-tag"
+        elif "GST" in blob:
+            purification = "GST"
+        elif "V5" in blob:
+            purification = "V5"
+        elif re.search(r"\bTAP\b", blob) or "TANDEM AFFINITY" in blob:
+            purification = "TAP"
+        elif "BIOTIN" in blob:
+            purification = "Biotin"
 
-    concentration = "Not specified"
-    if (
-        "AMMONIUM SULFATE" in blob
-        or "AMMONIUM SULPHATE" in blob
-        or "NH4SO4" in blob
-        or "(NH4)2SO4" in blob
-        or "AMSULF" in blob
-    ):
-        concentration = "Ammonium sulfate precipitation"
-    elif "TCA" in blob or "TRICHLOROACETIC" in blob:
-        concentration = "TCA precipitation"
-    elif "ACETONE" in blob and "PRECIP" in blob:
-        concentration = "Acetone precipitation"
-    elif "CHLOROFORM" in blob or "METH-CHLOR" in blob:
-        concentration = "Organic extraction / phase separation"
-    elif "SPIN COLUMN" in blob or "CONCENTRAT" in blob:
-        concentration = "Spin column / concentrator"
+        concentration = "Not specified"
+        if (
+            "AMMONIUM SULFATE" in blob
+            or "AMMONIUM SULPHATE" in blob
+            or "NH4SO4" in blob
+            or "(NH4)2SO4" in blob
+            or "AMSULF" in blob
+        ):
+            concentration = "Ammonium sulfate precipitation"
+        elif "TCA" in blob or "TRICHLOROACETIC" in blob:
+            concentration = "TCA precipitation"
+        elif "ACETONE" in blob and "PRECIP" in blob:
+            concentration = "Acetone precipitation"
+        elif "CHLOROFORM" in blob or "METH-CHLOR" in blob:
+            concentration = "Organic extraction / phase separation"
+        elif "SPIN COLUMN" in blob or "CONCENTRAT" in blob:
+            concentration = "Spin column / concentrator"
 
-    fixation = "Not specified"
-    if "DSP" in blob or "DSS" in blob or "CROSSLINK" in blob or re.search(r"\bXL\b", blob) or "CROSS-LINK" in blob:
-        fixation = "Chemical crosslinking"
-    elif "FORMALDEHYDE" in blob or " PFA " in blob or "PARAFORMALDEHYDE" in blob:
-        fixation = "Formaldehyde / PFA fixation"
-    elif "GLUTARALDEHYDE" in blob:
-        fixation = "Glutaraldehyde fixation"
+        fixation = "Not specified"
+        if "DSP" in blob or "DSS" in blob or "CROSSLINK" in blob or re.search(r"\bXL\b", blob) or "CROSS-LINK" in blob:
+            fixation = "Chemical crosslinking"
+        elif "FORMALDEHYDE" in blob or " PFA " in blob or "PARAFORMALDEHYDE" in blob:
+            fixation = "Formaldehyde / PFA fixation"
+        elif "GLUTARALDEHYDE" in blob:
+            fixation = "Glutaraldehyde fixation"
 
-    nuclease = "Not specified"
-    if "BENZONASE" in blob:
-        nuclease = "Benzonase"
-    elif "MNASE" in blob or "MICROCOCCAL" in blob:
-        nuclease = "MNase / micrococcal nuclease"
-    elif "DNASE" in blob:
-        nuclease = "DNase"
-    elif "RNASE" in blob:
-        nuclease = "RNase"
+        nuclease = "Not specified"
+        if "BENZONASE" in blob:
+            nuclease = "Benzonase"
+        elif "MNASE" in blob or "MICROCOCCAL" in blob:
+            nuclease = "MNase / micrococcal nuclease"
+        elif "DNASE" in blob:
+            nuclease = "DNase"
+        elif "RNASE" in blob:
+            nuclease = "RNase"
 
-    return {
-        "genetic_background": genetic,
-        "treatment": treatment,
-        "purification_tag": purification,
-        "concentration_method": concentration,
-        "fixation_crosslinking": fixation,
-        "nuclease_treatment": nuclease,
-    }
+        return {
+            "genetic_background": genetic,
+            "treatment": treatment,
+            "purification_tag": purification,
+            "concentration_method": concentration,
+            "fixation_crosslinking": fixation,
+            "nuclease_treatment": nuclease,
+        }
+    except (TypeError, AttributeError, ValueError, re.error):
+        return discovery_filter_tag_defaults_unknown()
+
+
+def discovery_filter_tag_row_from_record(row: Any) -> Dict[str, str]:
+    """
+    Safe wrapper for manifest rows (Series/dict-like): missing keys never crash.
+    """
+    try:
+        if isinstance(row, pd.Series):
+            details = row.get("details")
+            sample_label = row.get("sample_label")
+            biological_condition = row.get("biological_condition")
+        elif isinstance(row, dict):
+            details = row.get("details")
+            sample_label = row.get("sample_label")
+            biological_condition = row.get("biological_condition")
+        else:
+            details = getattr(row, "details", None)
+            sample_label = getattr(row, "sample_label", None)
+            biological_condition = getattr(row, "biological_condition", None)
+        return discovery_filter_tag_row(details, sample_label, biological_condition)
+    except Exception:
+        return discovery_filter_tag_defaults_unknown()

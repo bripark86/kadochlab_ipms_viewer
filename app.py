@@ -196,7 +196,7 @@ def enrich_manifest(df: pd.DataFrame) -> pd.DataFrame:
             out_df.at[i, "details"] = "N/A"
         if not str(out_df.at[i, "display_name"]).strip():
             out_df.at[i, "display_name"] = str(r.get("file_name", ""))
-    return out_df
+    return dp.apply_manifest_discovery_defaults(out_df)
 
 
 @st.cache_data(show_spinner=False)
@@ -704,17 +704,24 @@ if st.session_state["active_tab"] == "Discovery Hub":
         st.warning("No experiments available for the selected analysis pipeline.")
         st.stop()
 
-    _tag_df = hub_meta.apply(
-        lambda r: pd.Series(
-            dp.discovery_filter_tag_row(
-                r.get("details"),
-                r.get("sample_label"),
-                r.get("biological_condition"),
-            )
-        ),
-        axis=1,
-    )
-    hub_ctx = pd.concat([hub_meta.reset_index(drop=True), _tag_df], axis=1)
+    _tag_keys = list(dp.DISCOVERY_TAG_KEYS)
+    try:
+        _tag_df = hub_meta.apply(
+            lambda r: pd.Series(dp.discovery_filter_tag_row_from_record(r)),
+            axis=1,
+        )
+    except Exception:
+        _tag_df = pd.DataFrame(
+            [dp.discovery_filter_tag_defaults_unknown() for _ in range(len(hub_meta))],
+            index=hub_meta.index,
+        )
+    if _tag_df.empty or set(_tag_df.columns) != set(_tag_keys):
+        _tag_df = pd.DataFrame(
+            [dp.discovery_filter_tag_defaults_unknown() for _ in range(len(hub_meta))],
+            index=hub_meta.index,
+        )
+        _tag_df = _tag_df[_tag_keys]
+    hub_ctx = pd.concat([hub_meta.reset_index(drop=True), _tag_df.reset_index(drop=True)], axis=1)
     if "experiment_type" in hub_ctx.columns:
         hub_ctx["experiment_type"] = hub_ctx["experiment_type"].fillna("Unknown").astype(str)
     else:
