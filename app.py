@@ -4,6 +4,7 @@ import hashlib
 import json
 import math
 import re
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
 
@@ -12,15 +13,13 @@ import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
-import streamlit.components.v1 as components
 
 import data_processing as dp
 
 st.set_page_config(page_title="IPMS Viewer", layout="wide")
 
 DATA_ROOT = Path("Data")
-# Optional: paste your Google Form embed URL here, or set Streamlit secret FEEDBACK_FORM_URL
-FEEDBACK_FORM_EMBED_URL = ""
+FEEDBACK_LOG_PATH = DATA_ROOT / "app_feedback.txt"
 OVERRIDES_PATH = Path("metadata_overrides.json")
 
 
@@ -1372,20 +1371,25 @@ if st.session_state["active_tab"] == "Data Management":
 if st.session_state["active_tab"] == "Feedback":
     st.header("🚀 Help us improve the BAF IP-MS Viewer")
     st.subheader("Found a bug? Want a new chart? Let us know below.")
-    _form_url = FEEDBACK_FORM_EMBED_URL.strip()
-    if not _form_url:
-        try:
-            _form_url = str(st.secrets["FEEDBACK_FORM_URL"]).strip()
-        except Exception:
-            _form_url = ""
-    if _form_url:
-        components.iframe(_form_url, height=800, scrolling=True)
-    else:
-        st.info(
-            "Set your Google Form **embed** URL: add `FEEDBACK_FORM_URL` to `.streamlit/secrets.toml`, "
-            "or set `FEEDBACK_FORM_EMBED_URL` in `app.py`. Use the form’s share link with `?embedded=true` "
-            "(e.g. `https://docs.google.com/forms/d/e/<id>/viewform?embedded=true`)."
+    with st.form("feedback_form"):
+        name = st.text_input("Name (Optional)")
+        category = st.selectbox(
+            "Category",
+            ["Bug Report", "Feature Request", "Data Issue", "General Feedback"],
         )
+        suggestion = st.text_area("Your Suggestion", help="Tell us what's on your mind...")
+        submit = st.form_submit_button("Submit 🚀")
+    if submit:
+        if not suggestion or not str(suggestion).strip():
+            st.warning("Please enter a suggestion before submitting.")
+        else:
+            DATA_ROOT.mkdir(parents=True, exist_ok=True)
+            ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            name_part = str(name).strip() if str(name).strip() else "Anonymous"
+            line = f"[{ts}] {category} - {name_part}: {str(suggestion).strip()}\n"
+            with open(FEEDBACK_LOG_PATH, "a", encoding="utf-8") as fb:
+                fb.write(line)
+            st.success("Thank you! Your feedback has been recorded.")
 
 if st.session_state["active_tab"] == "Admin Control":
     section_header("Admin Control", OCEAN_BLUE)
