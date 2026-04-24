@@ -4,7 +4,6 @@ import hashlib
 import json
 import math
 import re
-from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
 
@@ -13,13 +12,10 @@ import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
-from streamlit_gsheets import GSheetsConnection
 
 import data_processing as dp
 
 st.set_page_config(page_title="IPMS Viewer", layout="wide")
-
-conn = st.connection("gsheets", type=GSheetsConnection)
 
 DATA_ROOT = Path("Data")
 OVERRIDES_PATH = Path("metadata_overrides.json")
@@ -546,7 +542,7 @@ if "stats_valid" not in st.session_state:
 if "app_mode" not in st.session_state:
     st.session_state["app_mode"] = MODE_CSV
 
-tab_options = ["Dataset Browser", "Discovery Hub", "Comparative Analysis", "Data Management", "Feedback"]
+tab_options = ["Dataset Browser", "Discovery Hub", "Comparative Analysis", "Data Management"]
 if st.session_state["active_tab"] not in tab_options:
     st.session_state["active_tab"] = "Dataset Browser"
 
@@ -1369,39 +1365,6 @@ if st.session_state["active_tab"] == "Data Management":
             get_path_metadata.clear()
             load_experiment_summary.clear()
             st.warning(f"Deleted: {delete_file}")
-
-if st.session_state["active_tab"] == "Feedback":
-    st.header("🚀 Help us improve the BAF IP-MS Viewer")
-    st.subheader("Found a bug? Want a new chart? Let us know below.")
-    with st.form("feedback_form"):
-        name = st.text_input("Name (Optional)")
-        category = st.selectbox(
-            "Category",
-            ["Bug Report", "Feature Request", "Data Issue", "General Feedback"],
-        )
-        suggestion = st.text_area("Your Suggestion", help="Tell us what's on your mind...")
-        submit = st.form_submit_button("Submit 🚀")
-    if submit:
-        if not suggestion or not str(suggestion).strip():
-            st.warning("Please enter a suggestion before submitting.")
-        else:
-            ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            name_part = str(name).strip() if str(name).strip() else "Anonymous"
-            sug = str(suggestion).strip()
-            _fb_cols = ["Timestamp", "Name", "Category", "Suggestion"]
-            try:
-                existing_data = conn.read(worksheet="Sheet1", usecols=[0, 1, 2, 3], ttl=0)
-                if existing_data is None or existing_data.empty or existing_data.shape[1] < 4:
-                    existing_data = pd.DataFrame(columns=_fb_cols)
-                else:
-                    existing_data = existing_data.iloc[:, :4].copy()
-                    existing_data.columns = _fb_cols
-                new_row_df = pd.DataFrame([[ts, name_part, category, sug]], columns=_fb_cols)
-                updated_df = pd.concat([existing_data, new_row_df], ignore_index=True)
-                conn.update(worksheet="Sheet1", data=updated_df)
-                st.success("Feedback sent directly to Google Sheets!")
-            except Exception:
-                st.warning("Could not connect to Google Sheets. Please check back later!")
 
 if st.session_state["active_tab"] == "Admin Control":
     section_header("Admin Control", OCEAN_BLUE)
